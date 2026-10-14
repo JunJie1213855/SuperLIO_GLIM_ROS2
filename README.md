@@ -39,9 +39,56 @@ Unitree 数据集下载地址：
 
 本机有两套 GTSAM：ROS Humble 的 4.2 和 `/usr/local` 的 4.3a1。GLIM 与 gtsam_points 需要使用 4.3a1；构建和运行时都要避免 ROS 的 4.2 抢占。
 
+安装源
+```bash
+sudo apt install curl gpg
+curl -s https://koide3.github.io/ppa/setup_ppa.sh | sudo bash
+```
+
+安装依赖库
+```bash
+sudo apt update
+sudo apt install -y libiridescence-dev libboost-all-dev libglfw3-dev libmetis-dev
+
+# Choose one of the follows
+sudo apt install -y libgtsam-points-dev           # without CUDA
+sudo apt install -y libgtsam-points-cuda12.2-dev  # with CUDA 12.2 (Ubuntu 22.04 only)
+sudo apt install -y libgtsam-points-cuda12.6-dev  # with CUDA 12.6
+sudo apt install -y libgtsam-points-cuda13.1-dev  # with CUDA 13.1
+```
+
+
+注意不要安装 ros2 humble 的 gtsam 库，它是 4.2 版本的（安装了也有方法转换，见下面），需要自己编译，查看下方命令，安装 ros2 依赖：
+```bash
+# Install dependencies
+sudo apt install libomp-dev libboost-all-dev libmetis-dev \
+                 libfmt-dev libspdlog-dev \
+                 libglm-dev libglfw3-dev libpng-dev libjpeg-dev
+
+# Install GTSAM
+git clone https://github.com/borglab/gtsam
+cd gtsam && git checkout 4.3a0
+mkdir build && cd build
+cmake .. -DGTSAM_BUILD_EXAMPLES_ALWAYS=OFF \
+         -DGTSAM_BUILD_TESTS=OFF \
+         -DGTSAM_WITH_TBB=OFF \
+         -DGTSAM_USE_SYSTEM_EIGEN=ON \
+         -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF
+make -j$(nproc)
+sudo make install
+
+# Make shared libraries visible to the system
+sudo ldconfig
+```
+
+开始编译代码
 ```bash
 cd /home/ros/ros_ws/SLAM_Merge_ws
 source /opt/ros/humble/setup.bash
+
+# 如果安装了 ros2 humble 的 gtsam4.2 就带上这个
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH  
+
 
 MAKEFLAGS="-j4" colcon build --symlink-install \
 --cmake-args \
