@@ -1,0 +1,51 @@
+# ROS 2 / colcon build outputs
+/build/
+/install/
+/log/
+
+# CMake and compiler artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.o
+*.a
+*.so
+*.so.*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# IDE and local environment
+.vscode/
+.idea/
+.cache/
+*.swp
+*.swo
+.DS_Store
+
+# ROS bags and generated mapping data (keep datasets/results out of Git)
+*.bag
+*.db3
+*.mcap
+*.pcd
+*.ply
+*.las
+*.laz
+*.posegraph
+*.g2o
+*.bin
+
+# Common generated export/dump directories
+*_result/
+*_export/
+*_dump/
+dump_*/
+
+# Runtime logs
+*.log
+logs/
