@@ -50,6 +50,7 @@ nav:
     - 'docker.md'
     - 'quickstart.md'
     - 'merge.md'
+    - 'mapping_merge_pipeline.md'
     - 'edit.md'
     - 'parameters.md'
     - 'demo.md'
