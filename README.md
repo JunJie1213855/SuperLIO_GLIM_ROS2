@@ -201,7 +201,7 @@ ros2 run glim_ros offline_viewer \
 
 |点云图一|点云图二|地图合并|
 |---|---|---|
-|![alt text](image.png)|![alt text](image-1.png)|![alt text](image-2.png)|
+|![alt text](images/image.png)|![alt text](images/image-1.png)|![alt text](images/image-2.png)|
 
 
 
