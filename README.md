@@ -14,6 +14,7 @@
   └── tools/
       ├── export_superlio.py
       ├── lio2glim.py
+      ├── glim2lio.py       # 反向：dump → PCD + TUM（见第 5 节）
       ├── glim_graph_writer.cpp
       └── fix_dump_boost19.py
 ```
@@ -251,6 +252,65 @@ ros2 run glim_ros offline_viewer \
 |![alt text](images/image.png)|![alt text](images/image-1.png)|![alt text](images/image-2.png)|
 
 
+
+## 5. 反向导出：`dump` → PCD + TUM（`glim2lio.py`）
+
+`glim2lio.py` 是 `lio2glim.py` 的逆过程：把 GLIM `dump` 转回通用的「PCD 序列 + TUM 位姿」，便于用其它工具查看、重采样，或经 `lio2glim.py` 再转回 `dump` 形成闭环。子图内点云存的是 origin 系（`T_world_origin^-1 @ p_world`），脚本按 `p_world = T_world_origin @ p_origin` 还原到世界系；`data.txt` 里的逐帧 `T_world_lidar` 已是世界系位姿，直接沿用。
+
+```bash
+python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
+  --dump /home/ros/dataset/unitree/superlio_results/firstpart_dump \
+  --out  /home/ros/dataset/unitree/superlio_results/firstpart_reverse
+```
+
+输出结构：
+
+    firstpart_reverse/
+    ├── clouds/000000.pcd ...         # 每个子图一张世界系点云，与 poses.txt 1:1
+    ├── poses.txt                     # TUM：每个子图一行（取 T_world_origin）
+    ├── frames.txt                    # TUM：dump 内每一帧一行（T_world_lidar）
+    └── glim2lio_manifest.json
+
+`clouds/` 与 `poses.txt` 按子图一一对应，可直接喂回 `lio2glim.py`；`frames.txt` 保留 dump 里的完整帧轨迹（帧数多于子图数，不与点云对应）。GLIM 已把每个子图内的帧合并、降采样成一张点云，逐帧点云无法恢复，所以点云只按子图输出。
+
+### 5.1 同时保存全局点云
+
+加 `--global-cloud`，会把所有子图按 `T_world_origin` 变换到世界系后拼成一整幅地图，写成 `<out>/merged.pcd`：
+
+```bash
+python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
+  --dump /home/ros/dataset/unitree/superlio_results/firstpart_dump \
+  --out  /home/ros/dataset/unitree/superlio_results/firstpart_reverse \
+  --global-cloud --global-voxel-size 0.2
+```
+
+`merged.pcd` 是「所有子图点云求并集」，只用于整体查看——一张图没有位姿，不能喂回 `lio2glim.py`。子图点云与全局点云各自独立降采样：`--voxel-size` 控制 `clouds/`，`--global-voxel-size` 控制 `merged.pcd`（缺省沿用 `--voxel-size`，`0` = 不降采样）。地图很大时先给 `--global-voxel-size` 一个较大值再跑，可降低内存占用。
+
+### 5.2 常用参数与闭环
+
+| 参数 | 作用 |
+|---|---|
+| `--dump <dir>` | 输入：GLIM `dump` 目录 |
+| `--out <dir>` | 输出目录（不得已存在，防覆盖） |
+| `--voxel-size 0.3` | 子图点云体素降采样，默认 `0` = 不降采样（不需要 open3d） |
+| `--ascii` | 写 ASCII PCD，默认二进制 |
+| `--global-cloud` | 额外写全局点云 `<out>/merged.pcd` |
+| `--global-voxel-size 0.2` | 全局点云单独的体素降采样 |
+| `--force` | 覆盖已存在的输出目录（先删旧目录） |
+
+闭环回 `dump`：把 `clouds/` + `poses.txt` 交给 `lio2glim.py` 即可（两者子图数一致）：
+
+```bash
+python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
+  --poses /home/ros/dataset/unitree/superlio_results/firstpart_reverse/poses.txt \
+  --clouds /home/ros/dataset/unitree/superlio_results/firstpart_reverse/clouds \
+  --out /tmp/firstpart_round --frames-per-submap 10 --voxel-size 0.2 \
+  --config /home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/glim/config
+```
+
+检查转换是否正确：用 open3d 打开 `merged.pcd`（或任一子图点云），点云应连成整条轨迹，而不是挤成一团；挤成一团说明坐标方向反了。
+
+> 已知问题：本仓库把 glim 嵌套在 `src/glim/` 下，而 `lio2glim.py` 按 `src/glim/util/export_factors.cpp` 找源码，闭环那一步会报 `FileNotFoundError`。反向导出本身不受影响（可用 open3d 直接核对点云与位姿）。
 
 ## 故障排查
 
