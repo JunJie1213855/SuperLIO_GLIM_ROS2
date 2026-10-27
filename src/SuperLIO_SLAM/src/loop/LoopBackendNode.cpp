@@ -23,704 +23,1229 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <visualization_msgs/msg/marker.hpp>
 
-namespace super_lio_slam {
-namespace {
+namespace super_lio_slam
+{
+  namespace
+  {
 
-gtsam::Vector6 poseSigmas(double rotation, double translation) {
-  gtsam::Vector6 sigma;
-  sigma << rotation, rotation, rotation, translation, translation, translation;
-  return sigma;
-}
-
-double degrees(double radians) { return radians * 180.0 / M_PI; }
-
-}  // namespace
-
-LoopBackendNode::LoopBackendNode() : rclcpp::Node("loop_backend_node") {
-  // STD uses its own contiguous index for descriptors and plane clouds. It is
-  // deliberately independent of the incoming ID so reconnects are harmless.
-  std_manager_.current_frame_id_ = 0;
-  read_parameters(*this, std_manager_.config_setting_);
-
-  keyframe_cloud_voxel_size_ = declare_parameter<double>("keyframe_cloud_voxel_size", 0.25);
-  keyframe_cloud_max_points_ = declare_parameter<int>("keyframe_cloud_max_points", 30000);
-  icp_voxel_size_ = declare_parameter<double>("icp_voxel_size", 0.5);
-  icp_max_correspondence_distance_ =
-      declare_parameter<double>("icp_max_correspondence_distance", 2.0);
-  icp_max_iterations_ = declare_parameter<int>("icp_max_iterations", 50);
-  icp_fitness_threshold_ = declare_parameter<double>("icp_fitness_threshold", 0.8);
-  icp_min_overlap_ratio_ = declare_parameter<double>("icp_min_overlap_ratio", 0.35);
-  icp_max_translation_correction_ =
-      declare_parameter<double>("icp_max_translation_correction", 5.0);
-  icp_max_rotation_correction_deg_ =
-      declare_parameter<double>("icp_max_rotation_correction_deg", 20.0);
-  icp_submap_half_width_ = declare_parameter<int>("icp_submap_half_width", 5);
-  icp_min_points_ = declare_parameter<int>("icp_min_points", 100);
-  icp_max_source_points_ = declare_parameter<int>("icp_max_source_points", 10000);
-  icp_max_target_points_ = declare_parameter<int>("icp_max_target_points", 50000);
-  loop_min_interval_ = declare_parameter<int>("loop_min_interval", 20);
-  loop_diagnostic_stride_ = declare_parameter<int>("loop_diagnostic_stride", 1);
-  map_publish_stride_ = declare_parameter<int>("map_publish_stride", 30);
-  map_max_keyframes_ = declare_parameter<int>("map_max_keyframes", 2000);
-  map_max_points_per_keyframe_ =
-      declare_parameter<int>("map_max_points_per_keyframe", 1000);
-  map_voxel_size_ = declare_parameter<double>("map_voxel_size", 0.5);
-  path_max_poses_ = declare_parameter<int>("path_max_poses", 10000);
-  std_visualization_max_triangles_ =
-      declare_parameter<int>("std_visualization_max_triangles", 100);
-  tf_publish_rate_hz_ = declare_parameter<double>("tf_publish_rate_hz", 20.0);
-
-  const double prior_trans = declare_parameter<double>("graph_prior_translation_sigma", 0.001);
-  const double prior_rot = declare_parameter<double>("graph_prior_rotation_sigma", 0.001);
-  const double odom_trans = declare_parameter<double>("graph_odom_translation_sigma", 0.10);
-  const double odom_rot = declare_parameter<double>("graph_odom_rotation_sigma", 0.03);
-  const double loop_trans = declare_parameter<double>("graph_loop_translation_sigma", 0.25);
-  const double loop_rot = declare_parameter<double>("graph_loop_rotation_sigma", 0.05);
-  const double huber_k = declare_parameter<double>("graph_loop_huber_k", 1.5);
-  prior_noise_ = gtsam::noiseModel::Diagonal::Sigmas(
-      poseSigmas(std::max(1e-6, prior_rot), std::max(1e-6, prior_trans)));
-  odom_noise_ = gtsam::noiseModel::Diagonal::Sigmas(
-      poseSigmas(std::max(1e-6, odom_rot), std::max(1e-6, odom_trans)));
-  loop_noise_ = gtsam::noiseModel::Robust::Create(
-      gtsam::noiseModel::mEstimator::Huber::Create(std::max(0.01, huber_k)),
-      gtsam::noiseModel::Diagonal::Sigmas(
-          poseSigmas(std::max(1e-6, loop_rot), std::max(1e-6, loop_trans))));
-
-  keyframe_cloud_max_points_ = std::max(100, keyframe_cloud_max_points_);
-  if (!std::isfinite(icp_voxel_size_) || icp_voxel_size_ < 0.01) {
-    icp_voxel_size_ = 0.5;
-  }
-  if (!std::isfinite(icp_max_correspondence_distance_) ||
-      icp_max_correspondence_distance_ <= 0.0) {
-    icp_max_correspondence_distance_ = 2.0;
-  }
-  if (!std::isfinite(icp_fitness_threshold_) || icp_fitness_threshold_ <= 0.0) {
-    icp_fitness_threshold_ = 0.8;
-  }
-  icp_min_overlap_ratio_ = std::isfinite(icp_min_overlap_ratio_)
-      ? std::clamp(icp_min_overlap_ratio_, 0.0, 1.0) : 0.35;
-  if (!std::isfinite(icp_max_translation_correction_) ||
-      icp_max_translation_correction_ <= 0.0) {
-    icp_max_translation_correction_ = 5.0;
-  }
-  if (!std::isfinite(icp_max_rotation_correction_deg_) ||
-      icp_max_rotation_correction_deg_ <= 0.0) {
-    icp_max_rotation_correction_deg_ = 20.0;
-  }
-  icp_max_source_points_ = std::max(100, icp_max_source_points_);
-  icp_max_target_points_ = std::max(100, icp_max_target_points_);
-  icp_min_points_ = std::max(10, icp_min_points_);
-  icp_submap_half_width_ = std::max(0, icp_submap_half_width_);
-  icp_max_iterations_ = std::max(1, icp_max_iterations_);
-  loop_min_interval_ = std::max(0, loop_min_interval_);
-  loop_diagnostic_stride_ = std::max(0, loop_diagnostic_stride_);
-  map_publish_stride_ = std::max(1, map_publish_stride_);
-  map_max_points_per_keyframe_ = std::max(1, map_max_points_per_keyframe_);
-  path_max_poses_ = std::max(1, path_max_poses_);
-  std_visualization_max_triangles_ =
-      std::clamp(std_visualization_max_triangles_, 0, 1000);
-  if (!std::isfinite(tf_publish_rate_hz_)) tf_publish_rate_hz_ = 20.0;
-
-  auto output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
-  odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/lio_slam/odom", 10);
-  path_pub_ = create_publisher<nav_msgs::msg::Path>("/lio_slam/path", output_qos);
-  map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/lio_slam/map", output_qos);
-  marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
-      "/lio_slam/loop_markers", output_qos);
-  std_marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
-      "/lio_slam/std_triangles", output_qos);
-  tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
-  tf_callback_group_ = create_callback_group(
-      rclcpp::CallbackGroupType::MutuallyExclusive);
-  tf_timer_ = create_wall_timer(
-      std::chrono::milliseconds(static_cast<int>(1000.0 /
-          std::clamp(tf_publish_rate_hz_, 1.0, 100.0))),
-      [this]() {
-        publishMapToWorld(now());
-      },
-      tf_callback_group_);
-  keyframe_sub_ = create_subscription<super_lio_slam::msg::KeyFrame>(
-      "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
-      std::bind(&LoopBackendNode::onKeyFrame, this, std::placeholders::_1));
-
-  RCLCPP_INFO(get_logger(), "STD, ICP and iSAM2 loop backend ready");
-}
-
-gtsam::Pose3 LoopBackendNode::poseFromMsg(const geometry_msgs::msg::Pose &pose) {
-  const auto &p = pose.position;
-  const auto &r = pose.orientation;
-  if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
-      !std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.z) ||
-      !std::isfinite(r.w)) {
-    throw std::invalid_argument("non-finite keyframe pose");
-  }
-  Eigen::Quaterniond q(r.w, r.x, r.y, r.z);
-  if (q.norm() < 1e-6) {
-    throw std::invalid_argument("zero keyframe quaternion");
-  }
-  q.normalize();
-  return gtsam::Pose3(gtsam::Rot3(q.w(), q.x(), q.y(), q.z()),
-                      gtsam::Point3(p.x, p.y, p.z));
-}
-
-geometry_msgs::msg::Pose LoopBackendNode::poseToMsg(const gtsam::Pose3 &pose) {
-  geometry_msgs::msg::Pose output;
-  const auto p = pose.translation();
-  const auto q = pose.rotation().toQuaternion();
-  output.position.x = p.x();
-  output.position.y = p.y();
-  output.position.z = p.z();
-  output.orientation.x = q.x();
-  output.orientation.y = q.y();
-  output.orientation.z = q.z();
-  output.orientation.w = q.w();
-  return output;
-}
-
-LoopBackendNode::CloudPtr LoopBackendNode::downsample(
-    const CloudPtr &cloud, double voxel_size, std::size_t max_points) const {
-  CloudPtr filtered(new Cloud);
-  if (!cloud || cloud->empty()) return filtered;
-  if (voxel_size > 0.01) {
-    pcl::VoxelGrid<pcl::PointXYZI> voxel;
-    voxel.setLeafSize(static_cast<float>(voxel_size),
-                      static_cast<float>(voxel_size),
-                      static_cast<float>(voxel_size));
-    voxel.setInputCloud(cloud);
-    voxel.filter(*filtered);
-  } else {
-    *filtered = *cloud;
-  }
-  if (max_points > 0 && filtered->size() > max_points) {
-    CloudPtr capped(new Cloud);
-    capped->reserve(max_points);
-    const std::size_t stride =
-        (filtered->size() + max_points - 1) / max_points;
-    for (std::size_t i = 0; i < filtered->size(); i += stride) {
-      capped->push_back((*filtered)[i]);
+    gtsam::Vector6 poseSigmas(double rotation, double translation)
+    {
+      gtsam::Vector6 sigma;
+      sigma << rotation, rotation, rotation, translation, translation, translation;
+      return sigma;
     }
-    return capped;
-  }
-  return filtered;
-}
 
-LoopBackendNode::CloudPtr LoopBackendNode::convertAndFilter(
-    const sensor_msgs::msg::PointCloud2 &message) const {
-  CloudPtr raw(new Cloud);
-  pcl::fromROSMsg(message, *raw);
-  CloudPtr finite(new Cloud);
-  finite->reserve(raw->size());
-  for (auto p : *raw) {
-    if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) {
-      if (!std::isfinite(p.intensity)) p.intensity = 0.0f;
-      finite->push_back(p);
+    double degrees(double radians) { return radians * 180.0 / M_PI; }
+
+    gtsam::ISAM2Params onlineGraphParameters()
+    {
+      gtsam::ISAM2Params parameters;
+      parameters.relinearizeThreshold = 0.01;
+      parameters.relinearizeSkip = 1;
+      return parameters;
     }
-  }
-  return downsample(finite, keyframe_cloud_voxel_size_,
-                    static_cast<std::size_t>(keyframe_cloud_max_points_));
-}
 
-LoopBackendNode::CloudPtr LoopBackendNode::historicalSubmap(
-    std::size_t historical_index) const {
-  CloudPtr submap(new Cloud);
-  if (historical_index >= frames_.size()) return submap;
-  const std::size_t half = static_cast<std::size_t>(icp_submap_half_width_);
-  const std::size_t first = historical_index > half ? historical_index - half : 0;
-  const std::size_t last = std::min(frames_.size() - 1, historical_index + half);
-  const std::size_t count = last - first + 1;
-  const std::size_t per_frame_cap = std::max<std::size_t>(
-      100, (2 * static_cast<std::size_t>(icp_max_target_points_)) / count);
-  const gtsam::Pose3 &hist_pose = frames_[historical_index].odom_pose;
-  for (std::size_t i = first; i <= last; ++i) {
-    if (!frames_[i].cloud || frames_[i].cloud->empty()) continue;
-    const CloudPtr local = downsample(frames_[i].cloud, icp_voxel_size_,
-                                      per_frame_cap);
-    Cloud transformed;
-    const Eigen::Matrix4f historical_from_neighbor =
-        hist_pose.between(frames_[i].odom_pose).matrix().cast<float>();
-    pcl::transformPointCloud(*local, transformed, historical_from_neighbor);
-    *submap += transformed;
-  }
-  return downsample(submap, icp_voxel_size_,
-                    static_cast<std::size_t>(icp_max_target_points_));
-}
+  } // namespace
 
-std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
-    const CloudPtr &current_cloud, std::size_t current_index,
-    std::size_t historical_index,
-    const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const {
-  if (historical_index >= frames_.size() || !current_cloud ||
-      !std_transform.first.allFinite() || !std_transform.second.allFinite()) {
-    RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: invalid input or STD transform",
-                historical_index, current_index);
-    return nullptr;
-  }
-  const CloudPtr source = downsample(
-      current_cloud, icp_voxel_size_,
-      static_cast<std::size_t>(icp_max_source_points_));
-  const CloudPtr target = historicalSubmap(historical_index);
-  if (source->size() < static_cast<std::size_t>(icp_min_points_) ||
-      target->size() < static_cast<std::size_t>(icp_min_points_)) {
-    RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: insufficient points (%zu source, %zu target, need %d)",
-                historical_index, current_index, source->size(), target->size(), icp_min_points_);
-    return nullptr;
-  }
+  LoopBackendNode::LoopBackendNode()
+      : rclcpp::Node("loop_backend_node"), isam_(onlineGraphParameters())
+  {
+    // STD uses its own contiguous index for descriptors and plane clouds. It is
+    // deliberately independent of the incoming ID so reconnects are harmless.
+    std_manager_.current_frame_id_ = 0;
+    read_parameters(*this, std_manager_.config_setting_);
 
-  Eigen::Matrix4f initial = Eigen::Matrix4f::Identity();
-  initial.block<3, 3>(0, 0) = std_transform.second.cast<float>();
-  initial.block<3, 1>(0, 3) = std_transform.first.cast<float>();
-  pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
-  icp.setInputSource(source);
-  icp.setInputTarget(target);
-  icp.setMaximumIterations(icp_max_iterations_);
-  icp.setMaxCorrespondenceDistance(icp_max_correspondence_distance_);
-  icp.setTransformationEpsilon(1e-6);
-  icp.setEuclideanFitnessEpsilon(1e-6);
-  Cloud aligned;
-  icp.align(aligned, initial);
-  if (aligned.empty() || !icp.hasConverged() ||
-      !std::isfinite(icp.getFitnessScore()) ||
-      icp.getFitnessScore() > icp_fitness_threshold_) {
-    RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: converged=%d, aligned=%zu, fitness=%.3f (limit %.3f)",
-                historical_index, current_index, icp.hasConverged(), aligned.size(),
-                icp.getFitnessScore(), icp_fitness_threshold_);
-    return nullptr;
-  }
-  const Eigen::Matrix4f result = icp.getFinalTransformation();
-  if (!result.allFinite()) {
-    RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: nonfinite transform",
-                historical_index, current_index);
-    return nullptr;
-  }
-  const Eigen::Matrix4d correction =
-      initial.cast<double>().inverse() * result.cast<double>();
-  const double correction_translation = correction.block<3, 1>(0, 3).norm();
-  const double correction_rotation = degrees(
-      Eigen::AngleAxisd(correction.block<3, 3>(0, 0)).angle());
-  if (correction_translation > icp_max_translation_correction_ ||
-      correction_rotation > icp_max_rotation_correction_deg_) {
-    RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: correction %.3f m, %.2f deg (limits %.3f m, %.2f deg)",
-                historical_index, current_index, correction_translation, correction_rotation,
-                icp_max_translation_correction_, icp_max_rotation_correction_deg_);
-    return nullptr;
-  }
+    // 闭环检测候选方法选择：std 和 distance
+    candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "distance");
+    // 两个选项
+    if (candidate_mode_ != "distance" && candidate_mode_ != "std")
+      throw std::invalid_argument("loop_candidate_mode must be distance or std");
+    registration_mode_ = declare_parameter<std::string>("loop_registration_mode", "std_icp");
+    if (registration_mode_ != "std_icp" && registration_mode_ != "std_teaser_gicp")
+      throw std::invalid_argument("loop_registration_mode must be std_icp or std_teaser_gicp");
+#ifndef SUPERLIO_WITH_TEASER
+    if (registration_mode_ == "std_teaser_gicp")
+      throw std::invalid_argument("std_teaser_gicp requires a build with SUPERLIO_WITH_TEASER=ON");
+#endif
 
-  pcl::KdTreeFLANN<pcl::PointXYZI> tree;
-  tree.setInputCloud(target);
-  std::vector<int> indices(1);
-  std::vector<float> squared_distances(1);
-  std::size_t correspondences = 0;
-  const double maximum_squared = icp_max_correspondence_distance_ *
-                                 icp_max_correspondence_distance_;
-  for (const auto &point : aligned) {
-    if (tree.nearestKSearch(point, 1, indices, squared_distances) == 1 &&
-        squared_distances.front() <= maximum_squared) {
-      ++correspondences;
+    // 是否大于 0 
+    auto positive = [this](const char *name, double value)
+    {
+      const double result = declare_parameter<double>(name, value);
+      if (!std::isfinite(result) || result <= 0)
+        throw std::invalid_argument(std::string(name) + " must be finite and positive");
+      return result;
+    };
+    // 是否在区间内 
+    auto bounded = [this](const char *name, int value, int low, int high)
+    {
+      const int result = declare_parameter<int>(name, value);
+      if (result < low || result > high)
+        throw std::invalid_argument(std::string(name) + " outside supported range");
+      return result;
+    };
+
+    // 基础参数设置
+    candidate_radius_m_ = positive("loop_candidate_radius_m", 15.0);
+    submap_limits_.max_frames = bounded("registration_submap_max_keyframes", 4, 1, 20);
+    submap_limits_.max_duration = positive("registration_submap_max_duration_s", 6.0);
+    submap_limits_.max_travel = positive("registration_submap_max_travel_distance_m", 6.0);
+    source_window_ = SubmapWindow(submap_limits_);
+    registration_top_k_ = bounded("std_registration_top_k", 3, 1, 10);
+    registration_budget_ms_ = positive("registration_soft_budget_ms", 500.0);
+    registration_queue_capacity_ = bounded("registration_queue_capacity", 2, 1, 100);
+
+    // 设置
+    auto &settings = registration_settings_;
+    settings.voxel = positive("registration_voxel_size_m", 0.5);
+    settings.min_points = bounded("registration_min_points", 100, 30, 100000);
+    settings.max_source = bounded("registration_max_source_points", 10000, 100, 100000);
+    settings.max_target = bounded("registration_max_target_points", 50000, 100, 200000);
+    settings.normal_radius = positive("fpfh_normal_radius_m", 1.0);
+    settings.feature_radius = positive("fpfh_feature_radius_m", 2.5);
+    if (settings.feature_radius <= settings.normal_radius)
+      throw std::invalid_argument("FPFH feature radius must exceed normal radius");
+    settings.feature_ratio = positive("fpfh_distance_ratio_threshold", 0.9);
+    settings.hint_radius = positive("fpfh_pose_hint_radius_m", 3.0);
+    if (settings.feature_ratio > 1)
+      throw std::invalid_argument("FPFH distance ratio must be <= 1");
+    settings.min_pairs = bounded("correspondence_min_unique", 6, 3, 500);
+    settings.max_pairs = bounded("correspondence_max_unique", 200, 3, 500);
+    if (settings.min_pairs > settings.max_pairs)
+      throw std::invalid_argument("minimum pairs exceeds maximum");
+    settings.min_baseline = positive("correspondence_min_baseline_m", 2.0);
+    if (declare_parameter<bool>("teaser_estimate_scaling", false))
+      throw std::invalid_argument("LiDAR registration requires teaser_estimate_scaling=false");
+    settings.noise_bound = positive("teaser_noise_bound_m", 0.3);
+    settings.rotation_iterations = bounded("teaser_rotation_max_iterations", 100, 1, 1000);
+    settings.clique_seconds = positive("teaser_max_clique_time_limit_s", 0.05);
+    settings.threads = bounded("teaser_max_clique_num_threads", 2, 1, 16);
+    settings.coarse_radius = positive("coarse_residual_threshold_m", 0.6);
+    settings.coarse_min_inliers = bounded("coarse_min_inliers", 6, 3, 500);
+    settings.coarse_min_ratio = positive("coarse_min_inlier_ratio", 0.3);
+    settings.coarse_max_rmse = positive("coarse_max_inlier_rmse_m", 0.3);
+    settings.max_iterations = bounded("gicp_max_iterations", 40, 1, 200);
+    settings.covariance_neighbors = bounded("gicp_correspondence_randomness", 20, 4, 100);
+    settings.correspondence_distance = positive("gicp_max_correspondence_distance_m", 2.0);
+    settings.quality_radius = positive("quality_nn_radius_m", 1.0);
+    settings.min_overlap = positive("quality_min_source_overlap", 0.35);
+    settings.min_current_overlap = positive("quality_min_current_frame_overlap", 0.35);
+    settings.min_inliers = bounded("quality_min_inlier_count", 100, 3, 100000);
+    settings.max_mse = positive("quality_max_inlier_mse_m2", 0.25);
+    settings.min_information_ratio = positive("quality_min_information_ratio", 1e-5);
+    settings.max_translation = positive("quality_max_refinement_translation_m", 5.0);
+    settings.max_rotation_deg = positive("quality_max_refinement_rotation_deg", 20.0);
+    if (settings.coarse_min_ratio > 1 || settings.min_overlap > 1 || settings.min_current_overlap > 1)
+      throw std::invalid_argument("overlap/inlier ratios must be <= 1");
+
+    // 普通参数声明
+    keyframe_cloud_voxel_size_ = declare_parameter<double>("keyframe_cloud_voxel_size", 0.25);
+    keyframe_cloud_max_points_ = declare_parameter<int>("keyframe_cloud_max_points", 30000);
+
+    // icp 相关参数
+    icp_voxel_size_ = declare_parameter<double>("icp_voxel_size", 0.5);
+    icp_max_correspondence_distance_ =
+        declare_parameter<double>("icp_max_correspondence_distance", 2.0);
+    icp_max_iterations_ = declare_parameter<int>("icp_max_iterations", 50);
+    icp_fitness_threshold_ = declare_parameter<double>("icp_fitness_threshold", 0.8);
+    icp_min_overlap_ratio_ = declare_parameter<double>("icp_min_overlap_ratio", 0.35);
+    icp_max_translation_correction_ =
+        declare_parameter<double>("icp_max_translation_correction", 5.0);
+    icp_max_rotation_correction_deg_ =
+        declare_parameter<double>("icp_max_rotation_correction_deg", 20.0);
+    icp_submap_half_width_ = declare_parameter<int>("icp_submap_half_width", 5);
+    icp_min_points_ = declare_parameter<int>("icp_min_points", 100);
+    icp_max_source_points_ = declare_parameter<int>("icp_max_source_points", 10000);
+    icp_max_target_points_ = declare_parameter<int>("icp_max_target_points", 50000);
+
+    // 回环的部分判决条件
+    loop_min_interval_ = declare_parameter<int>("loop_min_interval", 20);
+    loop_min_time_separation_s_ = declare_parameter<double>("loop_min_time_separation_s", 30.0);
+    if (!std::isfinite(loop_min_time_separation_s_) || loop_min_time_separation_s_ < 0.0)
+      throw std::invalid_argument("loop_min_time_separation_s must be finite and nonnegative");
+    loop_diagnostic_stride_ = declare_parameter<int>("loop_diagnostic_stride", 1);
+    map_publish_stride_ = declare_parameter<int>("map_publish_stride", 30);
+    map_max_keyframes_ = declare_parameter<int>("map_max_keyframes", 2000);
+    map_max_points_per_keyframe_ =
+        declare_parameter<int>("map_max_points_per_keyframe", 1000);
+    map_voxel_size_ = declare_parameter<double>("map_voxel_size", 0.5);
+    path_max_poses_ = declare_parameter<int>("path_max_poses", 10000);
+    std_visualization_max_triangles_ =
+        declare_parameter<int>("std_visualization_max_triangles", 100);
+    tf_publish_rate_hz_ = declare_parameter<double>("tf_publish_rate_hz", 20.0);
+
+    // gtsam 回环优化中的先验信息
+    const double prior_trans = declare_parameter<double>("graph_prior_translation_sigma", 0.001);
+    const double prior_rot = declare_parameter<double>("graph_prior_rotation_sigma", 0.001);
+    const double odom_trans = declare_parameter<double>("graph_odom_translation_sigma", 0.10);
+    const double odom_rot = declare_parameter<double>("graph_odom_rotation_sigma", 0.03);
+    const double loop_trans = declare_parameter<double>("graph_loop_translation_sigma", 0.25);
+    const double loop_rot = declare_parameter<double>("graph_loop_rotation_sigma", 0.05);
+    const double huber_k = declare_parameter<double>("graph_loop_huber_k", 1.5);
+
+    // iSAM2 噪声设置
+    prior_noise_ = gtsam::noiseModel::Diagonal::Sigmas(
+        poseSigmas(std::max(1e-6, prior_rot), std::max(1e-6, prior_trans)));
+    odom_noise_ = gtsam::noiseModel::Diagonal::Sigmas(
+        poseSigmas(std::max(1e-6, odom_rot), std::max(1e-6, odom_trans)));
+    loop_noise_ = gtsam::noiseModel::Robust::Create(
+        gtsam::noiseModel::mEstimator::Huber::Create(std::max(0.01, huber_k)),
+        gtsam::noiseModel::Diagonal::Sigmas(
+            poseSigmas(std::max(1e-6, loop_rot), std::max(1e-6, loop_trans))));
+
+    // 关键帧挑选
+    keyframe_cloud_max_points_ = std::max(100, keyframe_cloud_max_points_);
+    if (!std::isfinite(icp_voxel_size_) || icp_voxel_size_ < 0.01)
+    {
+      icp_voxel_size_ = 0.5;
     }
-  }
-  const double overlap = static_cast<double>(correspondences) /
-                         static_cast<double>(aligned.size());
-  if (!std::isfinite(overlap) || overlap < icp_min_overlap_ratio_) {
-    RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: overlap %.3f (minimum %.3f)",
-                historical_index, current_index, overlap, icp_min_overlap_ratio_);
-    return nullptr;
-  }
-
-  const Eigen::Matrix3d rotation = result.block<3, 3>(0, 0).cast<double>();
-  Eigen::Quaterniond q(rotation);
-  q.normalize();
-  auto observation = std::make_unique<IcpObservation>();
-  observation->historical_from_current = gtsam::Pose3(
-      gtsam::Rot3(q.w(), q.x(), q.y(), q.z()),
-      gtsam::Point3(result(0, 3), result(1, 3), result(2, 3)));
-  observation->fitness = icp.getFitnessScore();
-  observation->overlap = overlap;
-  return observation;
-}
-
-void LoopBackendNode::addGraphNode(
-    std::size_t index, const gtsam::Pose3 &raw_pose,
-    const std::unique_ptr<IcpObservation> &loop,
-    std::size_t historical_index) {
-  gtsam::NonlinearFactorGraph factors;
-  gtsam::Values initial;
-  if (index == 0) {
-    factors.add(gtsam::PriorFactor<gtsam::Pose3>(0, raw_pose, prior_noise_));
-    initial.insert(0, raw_pose);
-  } else {
-    const auto raw_delta = frames_[index - 1].odom_pose.between(raw_pose);
-    factors.add(gtsam::BetweenFactor<gtsam::Pose3>(index - 1, index,
-                                                  raw_delta, odom_noise_));
-    const gtsam::Pose3 seed = loop
-        ? frames_[historical_index].map_pose.compose(
-              loop->historical_from_current)
-        : frames_[index - 1].map_pose.compose(raw_delta);
-    initial.insert(index, seed);
-  }
-  if (loop) {
-    factors.add(gtsam::BetweenFactor<gtsam::Pose3>(
-        historical_index, index, loop->historical_from_current, loop_noise_));
-  }
-  isam_.update(factors, initial);
-  if (loop) {
-    // A loop can move every historical pose; refresh all published geometry.
-    isam_.update();
-    const gtsam::Values estimate = isam_.calculateEstimate();
-    for (std::size_t i = 0; i < frames_.size(); ++i) {
-      frames_[i].map_pose = estimate.at<gtsam::Pose3>(i);
+    if (!std::isfinite(icp_max_correspondence_distance_) ||
+        icp_max_correspondence_distance_ <= 0.0)
+    {
+      icp_max_correspondence_distance_ = 2.0;
     }
-  } else {
+    if (!std::isfinite(icp_fitness_threshold_) || icp_fitness_threshold_ <= 0.0)
+    {
+      icp_fitness_threshold_ = 0.8;
+    }
+    icp_min_overlap_ratio_ = std::isfinite(icp_min_overlap_ratio_)
+                                 ? std::clamp(icp_min_overlap_ratio_, 0.0, 1.0)
+                                 : 0.35;
+    if (!std::isfinite(icp_max_translation_correction_) ||
+        icp_max_translation_correction_ <= 0.0)
+    {
+      icp_max_translation_correction_ = 5.0;
+    }
+    if (!std::isfinite(icp_max_rotation_correction_deg_) ||
+        icp_max_rotation_correction_deg_ <= 0.0)
+    {
+      icp_max_rotation_correction_deg_ = 20.0;
+    }
+    icp_max_source_points_ = std::max(100, icp_max_source_points_);
+    icp_max_target_points_ = std::max(100, icp_max_target_points_);
+    icp_min_points_ = std::max(10, icp_min_points_);
+    icp_submap_half_width_ = std::max(0, icp_submap_half_width_);
+    icp_max_iterations_ = std::max(1, icp_max_iterations_);
+    loop_min_interval_ = std::max(0, loop_min_interval_);
+    loop_diagnostic_stride_ = std::max(0, loop_diagnostic_stride_);
+    map_publish_stride_ = std::max(1, map_publish_stride_);
+    map_max_points_per_keyframe_ = std::max(1, map_max_points_per_keyframe_);
+    path_max_poses_ = std::max(1, path_max_poses_);
+    std_visualization_max_triangles_ =
+        std::clamp(std_visualization_max_triangles_, 0, 1000);
+    if (!std::isfinite(tf_publish_rate_hz_))
+      tf_publish_rate_hz_ = 20.0;
+
+    auto output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
+
+    // 发布
+    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/lio_slam/odom", 10);
+    path_pub_ = create_publisher<nav_msgs::msg::Path>("/lio_slam/path", output_qos);
+    map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/lio_slam/map", output_qos);
+    marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        "/lio_slam/loop_markers", output_qos);
+    std_marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        "/lio_slam/std_triangles", output_qos);
+    // tf 广播器和定时器
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
+    tf_callback_group_ = create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    tf_timer_ = create_wall_timer(
+        std::chrono::milliseconds(static_cast<int>(1000.0 /
+                                                   std::clamp(tf_publish_rate_hz_, 1.0, 100.0))),
+        [this]()
+        {
+          publishMapToWorld();
+        },
+        tf_callback_group_);
+    // 关键帧订阅
+    keyframe_sub_ = create_subscription<super_lio_slam::msg::KeyFrame>(
+        "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
+        std::bind(&LoopBackendNode::onKeyFrame, this, std::placeholders::_1));
+    // 配准县城
+    registration_thread_ = std::thread(&LoopBackendNode::registrationWorker, this);
+    try
+    {
+      // 地图线程
+      map_thread_ = std::thread(&LoopBackendNode::mapWorker, this);
+    }
+    catch (...)
+    {
+      stopping_ = true;
+      registration_cv_.notify_all();
+      registration_thread_.join();
+      throw;
+    }
+    RCLCPP_INFO(get_logger(), "Loop backend ready: candidates=%s radius=%.1f m, %s + iSAM2, async registration queue=%zu",
+                candidate_mode_.c_str(), candidate_radius_m_, registration_mode_.c_str(), registration_queue_capacity_);
+  }
+
+  gtsam::Pose3 LoopBackendNode::poseFromMsg(const geometry_msgs::msg::Pose &pose)
+  {
+    const auto &p = pose.position;
+    const auto &r = pose.orientation;
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+        !std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.z) ||
+        !std::isfinite(r.w))
+    {
+      throw std::invalid_argument("non-finite keyframe pose");
+    }
+    Eigen::Quaterniond q(r.w, r.x, r.y, r.z);
+    if (q.norm() < 1e-6)
+    {
+      throw std::invalid_argument("zero keyframe quaternion");
+    }
+    q.normalize();
+    return gtsam::Pose3(gtsam::Rot3(q.w(), q.x(), q.y(), q.z()),
+                        gtsam::Point3(p.x, p.y, p.z));
+  }
+
+  geometry_msgs::msg::Pose LoopBackendNode::poseToMsg(const gtsam::Pose3 &pose)
+  {
+    geometry_msgs::msg::Pose output;
+    const auto p = pose.translation();
+    const auto q = pose.rotation().toQuaternion();
+    output.position.x = p.x();
+    output.position.y = p.y();
+    output.position.z = p.z();
+    output.orientation.x = q.x();
+    output.orientation.y = q.y();
+    output.orientation.z = q.z();
+    output.orientation.w = q.w();
+    return output;
+  }
+
+  LoopBackendNode::CloudPtr LoopBackendNode::downsample(
+      const CloudPtr &cloud, double voxel_size, std::size_t max_points) const
+  {
+    CloudPtr filtered(new Cloud);
+    if (!cloud || cloud->empty())
+      return filtered;
+    if (voxel_size > 0.01)
+    {
+      pcl::VoxelGrid<pcl::PointXYZI> voxel;
+      voxel.setLeafSize(static_cast<float>(voxel_size),
+                        static_cast<float>(voxel_size),
+                        static_cast<float>(voxel_size));
+      voxel.setInputCloud(cloud);
+      voxel.filter(*filtered);
+    }
+    else
+    {
+      *filtered = *cloud;
+    }
+    if (max_points > 0 && filtered->size() > max_points)
+    {
+      CloudPtr capped(new Cloud);
+      capped->reserve(max_points);
+      const std::size_t stride =
+          (filtered->size() + max_points - 1) / max_points;
+      for (std::size_t i = 0; i < filtered->size(); i += stride)
+      {
+        capped->push_back((*filtered)[i]);
+      }
+      return capped;
+    }
+    return filtered;
+  }
+
+  LoopBackendNode::CloudPtr LoopBackendNode::convertAndFilter(
+      const sensor_msgs::msg::PointCloud2 &message) const
+  {
+    CloudPtr raw(new Cloud);
+    pcl::fromROSMsg(message, *raw);
+    CloudPtr finite(new Cloud);
+    finite->reserve(raw->size());
+    for (auto p : *raw)
+    {
+      if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
+      {
+        if (!std::isfinite(p.intensity))
+          p.intensity = 0.0f;
+        finite->push_back(p);
+      }
+    }
+    return downsample(finite, keyframe_cloud_voxel_size_,
+                      static_cast<std::size_t>(keyframe_cloud_max_points_));
+  }
+
+  std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
+      const CloudPtr &current_cloud, const CloudPtr &target, std::size_t current_index,
+      std::size_t historical_index,
+      const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const
+  {
+    if (!target || !current_cloud ||
+        !std_transform.first.allFinite() || !std_transform.second.allFinite())
+    {
+      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: invalid input or initial transform",
+                  historical_index, current_index);
+      return nullptr;
+    }
+    const CloudPtr source = downsample(
+        current_cloud, icp_voxel_size_,
+        static_cast<std::size_t>(icp_max_source_points_));
+    if (source->size() < static_cast<std::size_t>(icp_min_points_) ||
+        target->size() < static_cast<std::size_t>(icp_min_points_))
+    {
+      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: insufficient points (%zu source, %zu target, need %d)",
+                  historical_index, current_index, source->size(), target->size(), icp_min_points_);
+      return nullptr;
+    }
+
+    Eigen::Matrix4f initial = Eigen::Matrix4f::Identity();
+    initial.block<3, 3>(0, 0) = std_transform.second.cast<float>();
+    initial.block<3, 1>(0, 3) = std_transform.first.cast<float>();
+    pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
+    icp.setInputSource(source);
+    icp.setInputTarget(target);
+    icp.setMaximumIterations(icp_max_iterations_);
+    icp.setMaxCorrespondenceDistance(icp_max_correspondence_distance_);
+    icp.setTransformationEpsilon(1e-6);
+    icp.setEuclideanFitnessEpsilon(1e-6);
+    Cloud aligned;
+    icp.align(aligned, initial);
+
+    // 阈值判断，是否达到对应的精度
+    if (aligned.empty() || !icp.hasConverged() ||
+        !std::isfinite(icp.getFitnessScore()) ||
+        icp.getFitnessScore() > icp_fitness_threshold_)
+    {
+      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: converged=%d, aligned=%zu, fitness=%.3f (limit %.3f)",
+                  historical_index, current_index, icp.hasConverged(), aligned.size(),
+                  icp.getFitnessScore(), icp_fitness_threshold_);
+      return nullptr;
+    }
+    const Eigen::Matrix4f result = icp.getFinalTransformation();
+    if (!result.allFinite())
+    {
+      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: nonfinite transform",
+                  historical_index, current_index);
+      return nullptr;
+    }
+    const Eigen::Matrix4d correction =
+        initial.cast<double>().inverse() * result.cast<double>();
+    const double correction_translation = correction.block<3, 1>(0, 3).norm();
+    const double correction_rotation = degrees(
+        Eigen::AngleAxisd(correction.block<3, 3>(0, 0)).angle());
+    if (correction_translation > icp_max_translation_correction_ ||
+        correction_rotation > icp_max_rotation_correction_deg_)
+    {
+      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: correction %.3f m, %.2f deg (limits %.3f m, %.2f deg)",
+                  historical_index, current_index, correction_translation, correction_rotation,
+                  icp_max_translation_correction_, icp_max_rotation_correction_deg_);
+      return nullptr;
+    }
+
+    pcl::KdTreeFLANN<pcl::PointXYZI> tree;
+    tree.setInputCloud(target);
+    std::vector<int> indices(1);
+    std::vector<float> squared_distances(1);
+    std::size_t correspondences = 0;
+    const double maximum_squared = icp_max_correspondence_distance_ *
+                                   icp_max_correspondence_distance_;
+    for (const auto &point : aligned)
+    {
+      if (tree.nearestKSearch(point, 1, indices, squared_distances) == 1 &&
+          squared_distances.front() <= maximum_squared)
+      {
+        ++correspondences;
+      }
+    }
+    const double overlap = static_cast<double>(correspondences) /
+                           static_cast<double>(aligned.size());
+    if (!std::isfinite(overlap) || overlap < icp_min_overlap_ratio_)
+    {
+      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: overlap %.3f (minimum %.3f)",
+                  historical_index, current_index, overlap, icp_min_overlap_ratio_);
+      return nullptr;
+    }
+
+    const Eigen::Matrix3d rotation = result.block<3, 3>(0, 0).cast<double>();
+    Eigen::Quaterniond q(rotation);
+    q.normalize();
+    auto observation = std::make_unique<IcpObservation>();
+    observation->historical_from_current = gtsam::Pose3(
+        gtsam::Rot3(q.w(), q.x(), q.y(), q.z()),
+        gtsam::Point3(result(0, 3), result(1, 3), result(2, 3)));
+    observation->fitness = icp.getFitnessScore();
+    observation->overlap = overlap;
+    return observation;
+  }
+
+  std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifySubmaps(
+      const SubmapWindow &source_window, const SubmapWindow &target_window, const CloudPtr &current_cloud,
+      std::size_t historical_index, const Eigen::Matrix4d *hint) const
+  {
+    if (source_window.sharesFrames(target_window))
+    {
+      RCLCPP_DEBUG(get_logger(), "Submap %zu rejected: shared window members", historical_index);
+      return nullptr;
+    }
+    const auto &settings = registration_settings_;
+    const auto source = source_window.cloud(settings.voxel, settings.max_source);
+    const auto target = target_window.cloud(settings.voxel, settings.max_target);
+    const auto current = downsample(current_cloud, settings.voxel, settings.max_source);
+    auto result = coarseRegister(source, target, settings, hint);
+    if (result.accepted)
+      result = refineRegister(source, target, current, settings, result);
+    // Hints reduce repeated-structure ambiguity but never gate candidate admission.
+    // Retry without the hint if either registration stage rejects the hinted pairs.
+    if (!result.accepted && hint)
+    {
+      RCLCPP_DEBUG(get_logger(), "Submap %zu hinted registration rejected (%s); retry unguided",
+                   historical_index, result.reason.c_str());
+      const double previous_ms = result.coarse_ms + result.fine_ms;
+      result = coarseRegister(source, target, settings);
+      if (result.accepted)
+        result = refineRegister(source, target, current, settings, result);
+      result.coarse_ms += previous_ms;
+    }
+    RCLCPP_INFO(get_logger(),
+                "Registration %zu -> %zu %s: stage=%s coarse_inliers=%zu/%zu ratio=%.3f (min %.3f) "
+                "coarse_rmse=%s m (max %.3f) gicp=%s",
+                historical_index, source_window.entries().back().index,
+                result.accepted ? "passed" : "rejected", result.reason.c_str(),
+                result.coarse_inliers, result.pairs,
+                result.pairs ? static_cast<double>(result.coarse_inliers) / result.pairs : 0.0,
+                settings.coarse_min_ratio,
+                result.coarse_inliers ? std::to_string(result.coarse_rmse).c_str() : "n/a",
+                settings.coarse_max_rmse, result.fine_ms > 0.0 ? "executed" : "skipped");
+    if (result.fine_ms > 0.0)
+    {
+      RCLCPP_INFO(get_logger(),
+                  "GICP %zu -> %zu: mse=%.4f m2 overlap=%.3f current_overlap=%.3f "
+                  "inliers=%zu info_ratio=%.6f",
+                  historical_index, source_window.entries().back().index,
+                  result.mse, result.overlap, result.current_overlap, result.inliers, result.information_ratio);
+    }
+    if (!result.accepted)
+      return nullptr;
+    auto observation = std::make_unique<IcpObservation>();
+    observation->historical_from_current = gtsam::Pose3(result.transform);
+    observation->fitness = result.mse;
+    observation->overlap = result.overlap;
+    return observation;
+  }
+
+  void LoopBackendNode::addGraphNode(
+      std::size_t index, const gtsam::Pose3 &raw_pose)
+  {
+    gtsam::NonlinearFactorGraph factors;
+    gtsam::Values initial;
+    if (index == 0)
+    {
+      factors.add(gtsam::PriorFactor<gtsam::Pose3>(0, raw_pose, prior_noise_));
+      initial.insert(0, raw_pose);
+    }
+    else
+    {
+      const auto raw_delta = frames_[index - 1].odom_pose.between(raw_pose);
+      factors.add(gtsam::BetweenFactor<gtsam::Pose3>(index - 1, index,
+                                                     raw_delta, odom_noise_));
+      initial.insert(index, frames_[index - 1].map_pose.compose(raw_delta));
+    }
+    isam_.update(factors, initial);
     frames_[index].map_pose = isam_.calculateEstimate<gtsam::Pose3>(index);
+    {
+      std::lock_guard<std::mutex> lock(map_tf_mutex_);
+      map_from_world_ = frames_[index].map_pose.compose(raw_pose.inverse());
+      have_map_transform_ = true;
+    }
   }
+
+  void LoopBackendNode::onKeyFrame(
+      const super_lio_slam::msg::KeyFrame::SharedPtr msg)
+  {
+    if (backend_faulted_)
+      return;
+    if (have_input_id_ && msg->id <= last_input_id_)
+    {
+      RCLCPP_WARN(get_logger(), "Ignoring duplicate or out-of-order keyframe %u",
+                  msg->id);
+      return;
+    }
+    const auto processing_begin = std::chrono::steady_clock::now();
+    gtsam::Pose3 raw_pose;
+    CloudPtr cloud;
+    try
+    {
+      raw_pose = poseFromMsg(msg->odom_pose);
+      cloud = convertAndFilter(msg->cloud);
+    }
+    catch (const std::exception &error)
+    {
+      RCLCPP_WARN(get_logger(), "Ignoring keyframe %u: %s", msg->id,
+                  error.what());
+      return;
+    }
+    if (cloud->size() < 10)
+    {
+      RCLCPP_WARN(get_logger(), "Ignoring sparse keyframe %u (%zu points)",
+                  msg->id, cloud->size());
+      return;
+    }
+    if (have_input_id_ && msg->id != last_input_id_ + 1)
+    {
+      RCLCPP_WARN(get_logger(), "Keyframe ID gap: %u followed by %u; using dense backend indices",
+                  last_input_id_, msg->id);
+    }
+
+    const double filter_ms = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - processing_begin)
+                                 .count();
+    std::size_t index;
+    bool enough_time_since_loop;
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      index = frames_.size();
+      enough_time_since_loop = !have_loop_ || index - last_loop_index_ >=
+                                                  static_cast<std::size_t>(loop_min_interval_);
+    }
+
+    // 累积滑动窗口
+    auto pending_window = source_window_;
+    if (registration_mode_ == "std_teaser_gicp")
+    {
+      try
+      {
+        pending_window.append({index, rclcpp::Time(msg->header.stamp).seconds(),
+                               Eigen::Isometry3d(raw_pose.matrix()), cloud});
+      }
+      catch (const std::exception &error)
+      {
+        RCLCPP_WARN(get_logger(), "Ignoring keyframe %u: %s", msg->id, error.what());
+        return;
+      }
+    }
+    // 注册一个配准任务
+    RegistrationTask task;
+    task.index = index;
+    task.current_cloud = cloud;
+    task.source_window = pending_window;
+
+    // STD 描述子，用于匹配
+    std::vector<STDesc> descriptors;
+    const auto plane_count = std_manager_.plane_cloud_vec_.size();
+    const auto corner_count = std_manager_.corner_cloud_vec_.size();
+    bool adding_descriptors = false;
+    double descriptor_ms = 0.0;
+    const auto std_begin = std::chrono::steady_clock::now();
+    if (candidate_mode_ == "distance") // 距离候选
+    {
+      if (enough_time_since_loop)
+      {
+        // Rank in the continuous raw odometry frame; never mix optimized and raw poses.
+        std::vector<std::pair<double, std::size_t>> nearest;
+        std::lock_guard<std::mutex> lock(graph_mutex_);
+        for (std::size_t h = 0; h < index; ++h)
+        {
+          if (!loopTimeEligible(msg->header.stamp, h)) // 查看是否在时间限制内，回环必须是 30 s 外的点云才可以做
+            continue;
+          const double distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
+          if (distance <= candidate_radius_m_)
+            nearest.emplace_back(distance, h);
+        }
+        std::sort(nearest.begin(), nearest.end());
+        std::vector<std::size_t> selected;
+        for (const auto &[distance, h] : nearest)
+        {
+          if (selected.size() >= static_cast<std::size_t>(registration_top_k_))
+            break;
+          if (std::any_of(selected.begin(), selected.end(), [h](std::size_t previous)
+                          { return h > previous ? h - previous <= 2 : previous - h <= 2; }))
+            continue;
+          RegistrationCandidate match;
+          match.historical_index = h;
+          const auto proposal = frames_[h].odom_pose.between(raw_pose);
+          match.proposal = {proposal.translation(), proposal.rotation().matrix()};
+          if (registration_mode_ == "std_teaser_gicp")
+          {
+            match.target_window = SubmapWindow(submap_limits_);
+            const std::size_t first = h + 1 > static_cast<std::size_t>(submap_limits_.max_frames)
+                                          ? h + 1 - submap_limits_.max_frames
+                                          : 0;
+            for (std::size_t j = first; j <= h; ++j)
+            {
+              const auto &frame = frames_[j];
+              match.target_window.append({j, rclcpp::Time(frame.stamp).seconds(),
+                                          Eigen::Isometry3d(frame.odom_pose.matrix()), frame.cloud});
+            }
+            if (pending_window.sharesFrames(match.target_window))
+              continue;
+          }
+          else
+          {
+            const auto half = static_cast<std::size_t>(std::max(0, icp_submap_half_width_));
+            const auto first = h > half ? h - half : 0;
+            const auto last = std::min(index - 1, h + half);
+            match.legacy_anchor = frames_[h].odom_pose;
+            match.legacy_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
+          }
+          selected.push_back(h);
+          const double gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
+          RCLCPP_DEBUG(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m time_gap=%.3f s",
+                       h, index, distance, gap);
+          task.candidates.push_back(std::move(match));
+        }
+      }
+    }
+    else // STD 描述子候选
+    {
+      try
+      {
+        // Only this callback owns STD state; workers consume immutable snapshots.
+        std_manager_.GenerateSTDescs(cloud, descriptors);
+        descriptor_ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - std_begin)
+                            .count();
+        if (enough_time_since_loop && !descriptors.empty())
+        {
+          if (registration_mode_ == "std_teaser_gicp")
+          {
+            const auto candidates = std_manager_.SearchCandidates(descriptors);
+            std::vector<int> tried;
+            for (const auto &candidate : candidates)
+            {
+              const int h = candidate.match_id_.second;
+              if (h < 0 || static_cast<std::size_t>(h) >= index)
+                continue;
+              {
+                std::lock_guard<std::mutex> lock(graph_mutex_);
+                if (!loopTimeEligible(msg->header.stamp, static_cast<std::size_t>(h)))
+                  continue;
+              }
+              if (std::any_of(tried.begin(), tried.end(), [h](int p)
+                              { return std::abs(p - h) <= 2; }))
+                continue;
+              if (tried.size() >= static_cast<std::size_t>(registration_top_k_))
+                break;
+              tried.push_back(h);
+              RegistrationCandidate match;
+              match.historical_index = static_cast<std::size_t>(h);
+              if (!std_manager_.CandidatePoseHint(candidate, match.proposal))
+                continue;
+              // Snapshot raw poses/clouds briefly; assembling/downsampling is a worker task.
+              {
+                std::lock_guard<std::mutex> lock(graph_mutex_);
+                const std::size_t first = h + 1 > submap_limits_.max_frames ? h + 1 - submap_limits_.max_frames : 0;
+                match.target_window = SubmapWindow(submap_limits_);
+                for (std::size_t j = first; j <= match.historical_index; ++j)
+                {
+                  const auto &f = frames_[j];
+                  match.target_window.append({j, rclcpp::Time(f.stamp).seconds(),
+                                              Eigen::Isometry3d(f.odom_pose.matrix()), f.cloud});
+                }
+              }
+              if (pending_window.sharesFrames(match.target_window))
+                continue;
+              RCLCPP_INFO(get_logger(), "STD %d -> %zu matched: triangle consistency passed", h, index);
+              task.candidates.push_back(std::move(match));
+            }
+          }
+          else if (!std_manager_.plane_cloud_vec_.empty() &&
+                   std_manager_.plane_cloud_vec_.back()->size() >= 3)
+          {
+            std::pair<int, double> result{-1, 0.0};
+            RegistrationCandidate match;
+            std::vector<std::pair<STDesc, STDesc>> pairs;
+            std_manager_.SearchLoop(descriptors, result, match.proposal, pairs, nullptr,
+                                    [this, &msg](int historical)
+                                    {
+                                      std::lock_guard<std::mutex> lock(graph_mutex_);
+                                      return historical >= 0 && loopTimeEligible(msg->header.stamp,
+                                                                                 static_cast<std::size_t>(historical));
+                                    });
+            if (result.first >= 0 && static_cast<std::size_t>(result.first) < index)
+            {
+              match.historical_index = static_cast<std::size_t>(result.first);
+              // Legacy targets also become local snapshots, assembled by the worker.
+              const std::size_t half = static_cast<std::size_t>(std::max(0, icp_submap_half_width_));
+              const std::size_t first = match.historical_index > half ? match.historical_index - half : 0;
+              const std::size_t last = std::min(index - 1, match.historical_index + half);
+              std::lock_guard<std::mutex> lock(graph_mutex_);
+              match.legacy_anchor = frames_[match.historical_index].odom_pose;
+              match.legacy_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
+              RCLCPP_INFO(get_logger(), "STD %zu -> %zu matched: score=%.3f", match.historical_index, index, result.second);
+              task.candidates.push_back(std::move(match));
+            }
+          }
+        }
+        adding_descriptors = true;
+        std_manager_.AddSTDescs(descriptors);
+      }
+      catch (const std::exception &error)
+      {
+        RCLCPP_ERROR(get_logger(), "STD failed on keyframe %u: %s", msg->id, error.what());
+        if (adding_descriptors)
+          backend_faulted_ = true;
+        else
+        {
+          std_manager_.plane_cloud_vec_.resize(plane_count);
+          std_manager_.corner_cloud_vec_.resize(corner_count);
+        }
+        return;
+      }
+    }
+    const double std_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - std_begin)
+                              .count();
+    {
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      Frame frame;
+      frame.input_id = msg->id;
+      frame.stamp = msg->header.stamp;
+      frame.odom_pose = raw_pose;
+      frame.cloud = cloud;
+      frames_.push_back(std::move(frame));
+      try
+      {
+        // Every ingested keyframe receives an odometry factor, regardless of queue overload.
+        addGraphNode(index, raw_pose);
+        publishCurrent(index, false);
+        publishStdTriangles(index, descriptors);
+      }
+      catch (const std::exception &error)
+      {
+        RCLCPP_ERROR(get_logger(), "Graph/publication failed on keyframe %u: %s", msg->id, error.what());
+        backend_faulted_ = true;
+        return;
+      }
+    }
+    source_window_ = std::move(pending_window);
+    last_input_id_ = msg->id;
+    have_input_id_ = true;
+    // 加入配准人物
+    if (!task.candidates.empty())
+      enqueueRegistration(std::move(task));
+    std::size_t queued, dropped;
+    {
+      std::lock_guard<std::mutex> lock(registration_mutex_);
+      queued = registration_tasks_.size();
+      dropped = registration_tasks_dropped_;
+    }
+    const double total_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - processing_begin)
+                                .count();
+    const double stamp_age = (now().seconds() - rclcpp::Time(msg->header.stamp).seconds());
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                         "Backend timing input=%u frames=%zu filter=%.1f ms descriptor=%.1f ms search_verify_insert=%.1f ms "
+                         "ingest=%.1f ms stamp_age=%.3f s registration_pending=%zu dropped_tasks=%zu",
+                         msg->id, index + 1, filter_ms, descriptor_ms, std_ms - descriptor_ms, total_ms, stamp_age, queued, dropped);
+  }
+
+  void LoopBackendNode::publishCurrent(std::size_t index, bool loop_accepted)
+  {
+    const Frame &frame = frames_[index];
+    nav_msgs::msg::Odometry odom;
+    odom.header.stamp = frame.stamp;
+    odom.header.frame_id = "map";
+    odom.child_frame_id = "imu";
+    odom.pose.pose = poseToMsg(frame.map_pose);
+    odom_pub_->publish(odom);
+
+    // The live correction uses the node clock, never a delayed keyframe stamp.
+    publishMapToWorld();
+
+    publishPath(frame.stamp);
+    if (loop_accepted || index % static_cast<std::size_t>(map_publish_stride_) == 0)
+    {
+      requestMap(frame.stamp);
+    }
+    if (loop_accepted)
+      publishLoopMarkers(frame.stamp);
+  }
+
+  void LoopBackendNode::publishMapToWorld()
   {
     std::lock_guard<std::mutex> lock(map_tf_mutex_);
-    map_from_world_ = frames_[index].map_pose.compose(raw_pose.inverse());
-    have_map_transform_ = true;
-  }
-}
-
-void LoopBackendNode::onKeyFrame(
-    const super_lio_slam::msg::KeyFrame::SharedPtr msg) {
-  if (backend_faulted_) return;
-  if (have_input_id_ && msg->id <= last_input_id_) {
-    RCLCPP_WARN(get_logger(), "Ignoring duplicate or out-of-order keyframe %u",
-                msg->id);
-    return;
-  }
-  gtsam::Pose3 raw_pose;
-  CloudPtr cloud;
-  try {
-    raw_pose = poseFromMsg(msg->odom_pose);
-    cloud = convertAndFilter(msg->cloud);
-  } catch (const std::exception &error) {
-    RCLCPP_WARN(get_logger(), "Ignoring keyframe %u: %s", msg->id,
-                error.what());
-    return;
-  }
-  if (cloud->size() < 10) {
-    RCLCPP_WARN(get_logger(), "Ignoring sparse keyframe %u (%zu points)",
-                msg->id, cloud->size());
-    return;
-  }
-  if (have_input_id_ && msg->id != last_input_id_ + 1) {
-    RCLCPP_WARN(get_logger(), "Keyframe ID gap: %u followed by %u; using dense backend indices",
-                last_input_id_, msg->id);
+    if (!have_map_transform_)
+      return;
+    const auto map_from_world = map_from_world_;
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = now();
+    tf.header.frame_id = "map";
+    tf.child_frame_id = "world";
+    const auto transform = poseToMsg(map_from_world);
+    tf.transform.translation.x = transform.position.x;
+    tf.transform.translation.y = transform.position.y;
+    tf.transform.translation.z = transform.position.z;
+    tf.transform.rotation = transform.orientation;
+    tf_broadcaster_->sendTransform(tf);
   }
 
-  const std::size_t index = frames_.size();
-  // GenerateSTDescs appends this frame's plane cloud. Search must run before
-  // AddSTDescs so a frame cannot match itself, and AddSTDescs advances the ID.
-  std::vector<STDesc> descriptors;
-  std::pair<int, double> search_result{-1, 0.0};
-  std::pair<Eigen::Vector3d, Eigen::Matrix3d> std_transform;
-  std::vector<std::pair<STDesc, STDesc>> matched_pairs;
-  STDSearchDiagnostics search_diagnostics;
-  const bool enough_time_since_loop =
-      !have_loop_ || index - last_loop_index_ >=
-                         static_cast<std::size_t>(loop_min_interval_);
-  const auto plane_count = std_manager_.plane_cloud_vec_.size();
-  const auto corner_count = std_manager_.corner_cloud_vec_.size();
-  bool adding_descriptors = false;
-  try {
-    std_manager_.GenerateSTDescs(cloud, descriptors);
-    if (enough_time_since_loop && !descriptors.empty() &&
-        !std_manager_.plane_cloud_vec_.empty() &&
-        std_manager_.plane_cloud_vec_.back()->size() >= 3) {
-      std_manager_.SearchLoop(descriptors, search_result, std_transform,
-                              matched_pairs, &search_diagnostics);
+  void LoopBackendNode::publishPath(const builtin_interfaces::msg::Time &stamp)
+  {
+    nav_msgs::msg::Path path;
+    path.header.stamp = stamp;
+    path.header.frame_id = "map";
+    const std::size_t first = frames_.size() > static_cast<std::size_t>(path_max_poses_)
+                                  ? frames_.size() - static_cast<std::size_t>(path_max_poses_)
+                                  : 0;
+    path.poses.reserve(frames_.size() - first);
+    for (std::size_t i = first; i < frames_.size(); ++i)
+    {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header.frame_id = "map";
+      pose.header.stamp = frames_[i].stamp;
+      pose.pose = poseToMsg(frames_[i].map_pose);
+      path.poses.push_back(std::move(pose));
     }
-    adding_descriptors = true;
-    std_manager_.AddSTDescs(descriptors);
-  } catch (const std::exception &error) {
-    RCLCPP_ERROR(get_logger(), "STD failed on keyframe %u: %s", msg->id,
-                 error.what());
-    if (adding_descriptors) {
-      // Insertion into STD's hash table is not transactional.
+    path_pub_->publish(path);
+  }
+
+  void LoopBackendNode::publishMap(const MapSnapshot &snapshot)
+  {
+    const auto &frames = snapshot.frames;
+    CloudPtr merged(new Cloud);
+    const std::size_t limit = map_max_keyframes_ > 0
+                                  ? static_cast<std::size_t>(map_max_keyframes_)
+                                  : frames.size();
+    const std::size_t first = frames.size() > limit ? frames.size() - limit : 0;
+    for (std::size_t i = first; i < frames.size(); ++i)
+    {
+      const CloudPtr sampled = downsample(
+          frames[i].cloud, 0.0,
+          static_cast<std::size_t>(map_max_points_per_keyframe_));
+      if (sampled->empty())
+        continue;
+      Cloud transformed;
+      pcl::transformPointCloud(*sampled, transformed,
+                               frames[i].map_pose.matrix().cast<float>());
+      *merged += transformed;
+    }
+    const CloudPtr map = downsample(merged, map_voxel_size_, 0);
+    sensor_msgs::msg::PointCloud2 output;
+    pcl::toROSMsg(*map, output);
+    output.header.stamp = snapshot.stamp;
+    output.header.frame_id = "map";
+    map_pub_->publish(output);
+  }
+
+  void LoopBackendNode::publishStdTriangles(
+      std::size_t index, const std::vector<STDesc> &descriptors)
+  {
+    using Marker = visualization_msgs::msg::Marker;
+    Marker edges;
+    edges.header.frame_id = "map";
+    edges.header.stamp = frames_[index].stamp;
+    edges.ns = "std_triangle_edges";
+    edges.id = 0;
+    edges.type = Marker::LINE_LIST;
+    edges.action = Marker::ADD;
+    edges.pose.orientation.w = 1.0;
+    edges.scale.x = 0.08;
+    edges.color.r = 0.1f;
+    edges.color.g = 0.7f;
+    edges.color.b = 1.0f;
+    edges.color.a = 0.9f;
+
+    Marker vertices = edges;
+    vertices.ns = "std_triangle_vertices";
+    vertices.type = Marker::SPHERE_LIST;
+    vertices.scale.x = vertices.scale.y = vertices.scale.z = 0.18;
+    vertices.color.r = 1.0f;
+    vertices.color.g = 0.9f;
+    vertices.color.b = 0.2f;
+
+    if (std_visualization_max_triangles_ > 0)
+    {
+      const std::size_t limit =
+          static_cast<std::size_t>(std_visualization_max_triangles_);
+      const std::size_t step = std::max<std::size_t>(
+          1, (descriptors.size() + limit - 1) / limit);
+      const auto &pose = frames_[index].map_pose;
+      for (std::size_t i = 0; i < descriptors.size(); i += step)
+      {
+        const auto &descriptor = descriptors[i];
+        const Eigen::Vector3d *local[3] = {
+            &descriptor.vertex_A_, &descriptor.vertex_B_, &descriptor.vertex_C_};
+        if (!local[0]->allFinite() || !local[1]->allFinite() ||
+            !local[2]->allFinite())
+          continue;
+        geometry_msgs::msg::Point corners[3];
+        for (int j = 0; j < 3; ++j)
+        {
+          const Eigen::Vector3d point =
+              pose.rotation().matrix() * *local[j] + pose.translation();
+          corners[j].x = point.x();
+          corners[j].y = point.y();
+          corners[j].z = point.z();
+          vertices.points.push_back(corners[j]);
+        }
+        for (int j = 0; j < 3; ++j)
+        {
+          edges.points.push_back(corners[j]);
+          edges.points.push_back(corners[(j + 1) % 3]);
+        }
+      }
+    }
+    // Reuse fixed marker IDs so each keyframe replaces the previous triangles.
+    // DELETE also clears an older display when this frame has no descriptors.
+    if (edges.points.empty())
+    {
+      edges.action = Marker::DELETE;
+      vertices.action = Marker::DELETE;
+    }
+    visualization_msgs::msg::MarkerArray markers;
+    markers.markers.push_back(std::move(edges));
+    markers.markers.push_back(std::move(vertices));
+    std_marker_pub_->publish(markers);
+  }
+
+  void LoopBackendNode::publishLoopMarkers(
+      const builtin_interfaces::msg::Time &stamp)
+  {
+    visualization_msgs::msg::Marker line;
+    line.header.frame_id = "map";
+    line.header.stamp = stamp;
+    line.ns = "accepted_loops";
+    line.id = 0;
+    line.type = visualization_msgs::msg::Marker::LINE_LIST;
+    line.action = visualization_msgs::msg::Marker::ADD;
+    line.pose.orientation.w = 1.0;
+    line.scale.x = 0.15;
+    line.color.r = 0.0f;
+    line.color.g = 0.9f;
+    line.color.b = 0.3f;
+    line.color.a = 1.0f;
+    line.points.reserve(2 * loops_.size());
+    for (const auto &[historical, current] : loops_)
+    {
+      for (const auto index : {historical, current})
+      {
+        const auto position = frames_[index].map_pose.translation();
+        geometry_msgs::msg::Point point;
+        point.x = position.x();
+        point.y = position.y();
+        point.z = position.z();
+        line.points.push_back(point);
+      }
+    }
+    visualization_msgs::msg::MarkerArray markers;
+    markers.markers.push_back(std::move(line));
+    marker_pub_->publish(markers);
+  }
+
+  LoopBackendNode::~LoopBackendNode()
+  {
+    stopping_ = true;
+    registration_cv_.notify_all();
+    map_cv_.notify_all();
+    if (registration_thread_.joinable())
+      registration_thread_.join();
+    if (map_thread_.joinable())
+      map_thread_.join();
+  }
+
+  void LoopBackendNode::enqueueRegistration(RegistrationTask task)
+  {
+    task.enqueued = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(registration_mutex_);
+      if (stopping_)
+        return;
+      if (registration_tasks_.size() >= registration_queue_capacity_)
+      {
+        registration_tasks_.pop_front();
+        ++registration_tasks_dropped_;
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                             "Registration queue full: capacity=%zu dropped_tasks=%zu (keyframes retained)",
+                             registration_queue_capacity_, registration_tasks_dropped_);
+      }
+      registration_tasks_.push_back(std::move(task));
+    }
+    registration_cv_.notify_one();
+  }
+
+  void LoopBackendNode::registrationWorker()
+  {
+    while (!stopping_)
+    {
+      RegistrationTask task;
+      {
+        std::unique_lock<std::mutex> lock(registration_mutex_);
+        registration_cv_.wait(lock, [this]
+                              { return stopping_ || !registration_tasks_.empty(); });
+        if (stopping_)
+          return;
+        task = std::move(registration_tasks_.front());
+        registration_tasks_.pop_front();
+      }
+      const auto begin = std::chrono::steady_clock::now();
+      const double queue_ms = std::chrono::duration<double, std::milli>(begin - task.enqueued).count();
+      try
+      {
+        for (const auto &candidate : task.candidates)
+        {
+          if (stopping_ || backend_faulted_)
+            break;
+          {
+            std::lock_guard<std::mutex> lock(graph_mutex_);
+            if (!loopTimeEligible(frames_[task.index].stamp, candidate.historical_index))
+              continue;
+            if (have_loop_ && (task.index <= last_loop_index_ ||
+                               task.index - last_loop_index_ < static_cast<std::size_t>(loop_min_interval_)))
+              break;
+          }
+          if (candidate_mode_ == "distance")
+            RCLCPP_INFO(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m; verifying registration",
+                        candidate.historical_index, task.index, candidate.proposal.first.norm());
+          std::unique_ptr<IcpObservation> observation;
+          if (registration_mode_ == "std_teaser_gicp")
+          {
+            Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
+            hint.block<3, 3>(0, 0) = candidate.proposal.second;
+            hint.block<3, 1>(0, 3) = candidate.proposal.first;
+            // 确认子图，获取观测
+            observation = verifySubmaps(task.source_window, candidate.target_window,
+                                        task.current_cloud, candidate.historical_index, &hint);
+          }
+          else
+          {
+            CloudPtr merged(new Cloud);
+            const auto cap = std::max<std::size_t>(100,
+                                                   2 * icp_max_target_points_ / candidate.legacy_frames.size());
+            for (const auto &frame : candidate.legacy_frames)
+            {
+              Cloud transformed;
+              const auto local = downsample(frame.cloud, icp_voxel_size_, cap);
+              pcl::transformPointCloud(*local, transformed,
+                                       candidate.legacy_anchor.between(frame.odom_pose).matrix().cast<float>().eval());
+              *merged += transformed;
+            }
+            const auto target = downsample(merged, icp_voxel_size_, icp_max_target_points_);
+            observation = verifyWithIcp(task.current_cloud, target, task.index,
+                                        candidate.historical_index, candidate.proposal);
+          }
+          if (observation && !stopping_)
+          {
+            std::lock_guard<std::mutex> lock(graph_mutex_);
+            // 提交闭环，让 gtsam 进行优化
+            if (!backend_faulted_)
+              commitLoop(task.index, candidate.historical_index, *observation);
+            break;
+          }
+          if (std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - begin)
+                  .count() > registration_budget_ms_)
+            break;
+        }
+      }
+      catch (const std::exception &error)
+      {
+        RCLCPP_ERROR(get_logger(), "Registration task %zu failed: %s", task.index, error.what());
+      }
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "Registration timing frame=%zu queue_wait=%.1f ms work=%.1f ms",
+                           task.index, queue_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+    }
+  }
+
+  bool LoopBackendNode::loopTimeEligible(
+      const builtin_interfaces::msg::Time &current, std::size_t historical) const
+  {
+    if (historical >= frames_.size())
+      return false;
+    // Subtract integer nanoseconds before comparing: exactly 30 s is rejected.
+    const auto gap = (rclcpp::Time(current) - rclcpp::Time(frames_[historical].stamp)).nanoseconds();
+    return static_cast<long double>(gap) >
+           static_cast<long double>(loop_min_time_separation_s_) * 1000000000.0L;
+  }
+
+  void LoopBackendNode::commitLoop(std::size_t index, std::size_t historical,
+                                   const IcpObservation &observation)
+  {
+    // graph_mutex_ held. A delayed result connects existing nodes; it never inserts
+    // another initial value or resets the current pose to the old task's pose.
+    if (index >= frames_.size() || historical >= index ||
+        !loopTimeEligible(frames_[index].stamp, historical))
+      return;
+    const auto begin = std::chrono::steady_clock::now();
+    try
+    {
+      gtsam::NonlinearFactorGraph factors;
+      factors.add(gtsam::BetweenFactor<gtsam::Pose3>(historical, index,
+                                                     observation.historical_from_current, loop_noise_));
+      // Existing nodes were initialized from odometry before this delayed loop.
+      // Refresh the robust weights/linearization, instead of relying on the
+      // default ten-update cadence or on seeding a newly inserted loop node.
+      gtsam::ISAM2UpdateParams parameters;
+      parameters.force_relinearize = true;
+      parameters.forceFullSolve = true;
+      isam_.update(factors, gtsam::Values{}, parameters);
+      for (int iteration = 0; iteration < 3; ++iteration)
+        isam_.update(gtsam::NonlinearFactorGraph{}, gtsam::Values{}, parameters);
+      const auto estimate = isam_.calculateEstimate();
+      for (std::size_t j = 0; j < frames_.size(); ++j)
+        frames_[j].map_pose = estimate.at<gtsam::Pose3>(j);
+    }
+    catch (...)
+    {
       backend_faulted_ = true;
       std::lock_guard<std::mutex> lock(map_tf_mutex_);
       have_map_transform_ = false;
-    } else {
-      std_manager_.plane_cloud_vec_.resize(plane_count);
-      std_manager_.corner_cloud_vec_.resize(corner_count);
+      throw;
     }
-    return;
-  }
-
-  // One bounded summary per selected keyframe; candidates are ranked by rough
-  // pairs, while the accepted match is selected by the plane geometry score.
-  if (loop_diagnostic_stride_ > 0 &&
-      index % static_cast<std::size_t>(loop_diagnostic_stride_) == 0) {
-    const std::size_t planes = std_manager_.plane_cloud_vec_.empty()
-        ? 0 : std_manager_.plane_cloud_vec_.back()->size();
-    const std::size_t corners = std_manager_.corner_cloud_vec_.empty()
-        ? 0 : std_manager_.corner_cloud_vec_.back()->size();
-    const STDCandidateDiagnostics *best = nullptr;
-    for (const auto &candidate : search_diagnostics.candidates) {
-      if (!best || candidate.plane_score > best->plane_score ||
-          (candidate.plane_score == best->plane_score &&
-           candidate.triangle_votes > best->triangle_votes)) best = &candidate;
-    }
-    const char *stage = "std_pass";
-    if (!enough_time_since_loop) stage = "cooldown";
-    else if (corners < 3) stage = "few_corners";
-    else if (descriptors.empty()) stage = "no_triangles";
-    else if (planes < 3) stage = "few_planes";
-    else if (search_diagnostics.hash_candidates == 0) stage = "no_hash_candidates";
-    else if (search_diagnostics.age_eligible == 0) stage = "near_frames_only";
-    else if (search_diagnostics.side_pass == 0) stage = "side_length_rejected";
-    else if (search_diagnostics.rough_pairs == 0) stage = "vertex_rejected";
-    else if (search_diagnostics.eligible_frames == 0) stage = "few_pairs_per_frame";
-    else if (search_result.first < 0 && best && best->triangle_votes < 4)
-      stage = "triangle_vote_rejected";
-    else if (search_result.first < 0) stage = "plane_score_rejected";
-    RCLCPP_INFO(get_logger(),
-        "Loop search input=%u backend=%zu stage=%s cloud=%zu planes=%zu corners=%zu triangles=%zu "
-        "hash_candidates=%zu age_eligible=%zu side_pass=%zu rough_pairs=%zu "
-        "rough_frames=%zu eligible_frames=%zu verified=%zu "
-        "best=%d rough=%zu votes=%d inliers=%zu plane_score=%.3f "
-        "(limits: skip_near=%d min_pairs=5 min_votes=4 plane_score>%.3f rough_dist=%.3f vertex_diff=%.3f corner_thre=%.1f desc_len=[%.1f,%.1f])",
-        msg->id, index, stage, cloud->size(), planes, corners, descriptors.size(),
-        search_diagnostics.hash_candidates, search_diagnostics.age_eligible,
-        search_diagnostics.side_pass, search_diagnostics.rough_pairs, search_diagnostics.rough_frames,
-        search_diagnostics.eligible_frames, search_diagnostics.candidates.size(),
-        best ? best->frame_id : -1, best ? best->rough_pairs : 0,
-        best ? best->triangle_votes : 0, best ? best->inlier_pairs : 0,
-        best ? best->plane_score : -1.0,
-        std_manager_.config_setting_.skip_near_num_,
-        std_manager_.config_setting_.icp_threshold_,
-        std_manager_.config_setting_.rough_dis_threshold_,
-        std_manager_.config_setting_.vertex_diff_threshold_,
-        std_manager_.config_setting_.corner_thre_,
-        std_manager_.config_setting_.descriptor_min_len_,
-        std_manager_.config_setting_.descriptor_max_len_);
-  }
-
-  std::size_t historical_index = 0;
-  std::unique_ptr<IcpObservation> loop;
-  if (search_result.first >= 0 &&
-      static_cast<std::size_t>(search_result.first) < index) {
-    historical_index = static_cast<std::size_t>(search_result.first);
-    try {
-      loop = verifyWithIcp(cloud, index, historical_index, std_transform);
-    } catch (const std::exception &error) {
-      RCLCPP_WARN(get_logger(), "ICP rejected keyframe %u: %s", msg->id,
-                  error.what());
-    }
-    if (loop) {
-      RCLCPP_INFO(get_logger(),
-                  "Loop %zu -> %zu accepted: STD %.3f, ICP fitness %.3f, overlap %.2f",
-                  historical_index, index, search_result.second,
-                  loop->fitness, loop->overlap);
-    } else {
-      RCLCPP_INFO(get_logger(), "Loop candidate %zu -> %zu rejected by ICP",
-                  historical_index, index);
-    }
-  }
-
-  Frame frame;
-  frame.input_id = msg->id;
-  frame.stamp = msg->header.stamp;
-  frame.odom_pose = raw_pose;
-  frame.cloud = std::move(cloud);
-  frames_.push_back(std::move(frame));
-  try {
-    addGraphNode(index, raw_pose, loop, historical_index);
-  } catch (const std::exception &error) {
-    RCLCPP_ERROR(get_logger(), "iSAM2 update failed on keyframe %u: %s",
-                 msg->id, error.what());
-    backend_faulted_ = true;
-    std::lock_guard<std::mutex> lock(map_tf_mutex_);
-    have_map_transform_ = false;
-    return;
-  }
-  if (loop) {
-    loops_.emplace_back(historical_index, index);
+    loops_.emplace_back(historical, index);
     last_loop_index_ = index;
     have_loop_ = true;
+    const auto latest = frames_.size() - 1;
+    {
+      std::lock_guard<std::mutex> lock(map_tf_mutex_);
+      map_from_world_ = frames_[latest].map_pose.compose(frames_[latest].odom_pose.inverse());
+      have_map_transform_ = true;
+    }
+    publishCurrent(latest, true);
+    RCLCPP_INFO(get_logger(), "Loop %zu -> %zu accepted: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
+                historical, index, registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "ICP",
+                observation.fitness, observation.overlap, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count(), latest);
   }
-  try {
-    publishCurrent(index, static_cast<bool>(loop));
-    publishStdTriangles(index, descriptors);
-  } catch (const std::exception &error) {
-    RCLCPP_ERROR(get_logger(), "Unable to publish keyframe %u: %s", msg->id,
-                 error.what());
-  }
-  last_input_id_ = msg->id;
-  have_input_id_ = true;
-}
 
-void LoopBackendNode::publishCurrent(std::size_t index, bool loop_accepted) {
-  const Frame &frame = frames_[index];
-  nav_msgs::msg::Odometry odom;
-  odom.header.stamp = frame.stamp;
-  odom.header.frame_id = "map";
-  odom.child_frame_id = "imu";
-  odom.pose.pose = poseToMsg(frame.map_pose);
-  odom_pub_->publish(odom);
-
-  publishMapToWorld(frame.stamp);
-
-  publishPath(frame.stamp);
-  if (loop_accepted || index % static_cast<std::size_t>(map_publish_stride_) == 0) {
-    publishMap(frame.stamp);
-  }
-  if (loop_accepted) publishLoopMarkers(frame.stamp);
-}
-
-void LoopBackendNode::publishMapToWorld(
-    const builtin_interfaces::msg::Time &stamp) {
-  gtsam::Pose3 map_from_world;
+  void LoopBackendNode::requestMap(const builtin_interfaces::msg::Time &stamp)
   {
-    std::lock_guard<std::mutex> lock(map_tf_mutex_);
-    if (!have_map_transform_) return;
-    map_from_world = map_from_world_;
+    // Called under graph_mutex_. Shared cloud pointers are immutable after ingest.
+    MapSnapshot snapshot;
+    const std::size_t limit = map_max_keyframes_ > 0 ? static_cast<std::size_t>(map_max_keyframes_) : frames_.size();
+    const std::size_t first = frames_.size() > limit ? frames_.size() - limit : 0;
+    snapshot.frames.assign(frames_.begin() + first, frames_.end());
+    snapshot.stamp = stamp;
+    snapshot.enqueued = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(map_mutex_);
+      pending_map_ = std::move(snapshot); // Coalesce into the newest pending snapshot.
+    }
+    map_cv_.notify_one();
   }
-  geometry_msgs::msg::TransformStamped tf;
-  tf.header.stamp = stamp;
-  tf.header.frame_id = "map";
-  tf.child_frame_id = "world";
-  const auto transform = poseToMsg(map_from_world);
-  tf.transform.translation.x = transform.position.x;
-  tf.transform.translation.y = transform.position.y;
-  tf.transform.translation.z = transform.position.z;
-  tf.transform.rotation = transform.orientation;
-  tf_broadcaster_->sendTransform(tf);
-}
 
-void LoopBackendNode::publishPath(const builtin_interfaces::msg::Time &stamp) {
-  nav_msgs::msg::Path path;
-  path.header.stamp = stamp;
-  path.header.frame_id = "map";
-  const std::size_t first = frames_.size() > static_cast<std::size_t>(path_max_poses_)
-                                ? frames_.size() - static_cast<std::size_t>(path_max_poses_)
-                                : 0;
-  path.poses.reserve(frames_.size() - first);
-  for (std::size_t i = first; i < frames_.size(); ++i) {
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header.frame_id = "map";
-    pose.header.stamp = frames_[i].stamp;
-    pose.pose = poseToMsg(frames_[i].map_pose);
-    path.poses.push_back(std::move(pose));
-  }
-  path_pub_->publish(path);
-}
-
-void LoopBackendNode::publishMap(const builtin_interfaces::msg::Time &stamp) {
-  CloudPtr merged(new Cloud);
-  const std::size_t limit = map_max_keyframes_ > 0
-      ? static_cast<std::size_t>(map_max_keyframes_) : frames_.size();
-  const std::size_t first = frames_.size() > limit ? frames_.size() - limit : 0;
-  for (std::size_t i = first; i < frames_.size(); ++i) {
-    const CloudPtr sampled = downsample(
-        frames_[i].cloud, 0.0,
-        static_cast<std::size_t>(map_max_points_per_keyframe_));
-    if (sampled->empty()) continue;
-    Cloud transformed;
-    pcl::transformPointCloud(*sampled, transformed,
-                             frames_[i].map_pose.matrix().cast<float>());
-    *merged += transformed;
-  }
-  const CloudPtr map = downsample(merged, map_voxel_size_, 0);
-  sensor_msgs::msg::PointCloud2 output;
-  pcl::toROSMsg(*map, output);
-  output.header.stamp = stamp;
-  output.header.frame_id = "map";
-  map_pub_->publish(output);
-}
-
-void LoopBackendNode::publishStdTriangles(
-    std::size_t index, const std::vector<STDesc> &descriptors) {
-  using Marker = visualization_msgs::msg::Marker;
-  Marker edges;
-  edges.header.frame_id = "map";
-  edges.header.stamp = frames_[index].stamp;
-  edges.ns = "std_triangle_edges";
-  edges.id = 0;
-  edges.type = Marker::LINE_LIST;
-  edges.action = Marker::ADD;
-  edges.pose.orientation.w = 1.0;
-  edges.scale.x = 0.08;
-  edges.color.r = 0.1f;
-  edges.color.g = 0.7f;
-  edges.color.b = 1.0f;
-  edges.color.a = 0.9f;
-
-  Marker vertices = edges;
-  vertices.ns = "std_triangle_vertices";
-  vertices.type = Marker::SPHERE_LIST;
-  vertices.scale.x = vertices.scale.y = vertices.scale.z = 0.18;
-  vertices.color.r = 1.0f;
-  vertices.color.g = 0.9f;
-  vertices.color.b = 0.2f;
-
-  if (std_visualization_max_triangles_ > 0) {
-    const std::size_t limit =
-        static_cast<std::size_t>(std_visualization_max_triangles_);
-    const std::size_t step = std::max<std::size_t>(
-        1, (descriptors.size() + limit - 1) / limit);
-    const auto &pose = frames_[index].map_pose;
-    for (std::size_t i = 0; i < descriptors.size(); i += step) {
-      const auto &descriptor = descriptors[i];
-      const Eigen::Vector3d *local[3] = {
-          &descriptor.vertex_A_, &descriptor.vertex_B_, &descriptor.vertex_C_};
-      if (!local[0]->allFinite() || !local[1]->allFinite() ||
-          !local[2]->allFinite()) continue;
-      geometry_msgs::msg::Point corners[3];
-      for (int j = 0; j < 3; ++j) {
-        const Eigen::Vector3d point =
-            pose.rotation().matrix() * *local[j] + pose.translation();
-        corners[j].x = point.x();
-        corners[j].y = point.y();
-        corners[j].z = point.z();
-        vertices.points.push_back(corners[j]);
+  void LoopBackendNode::mapWorker()
+  {
+    while (!stopping_)
+    {
+      MapSnapshot snapshot;
+      {
+        std::unique_lock<std::mutex> lock(map_mutex_);
+        map_cv_.wait(lock, [this]
+                     { return stopping_ || pending_map_.has_value(); });
+        if (stopping_)
+          return;
+        snapshot = std::move(*pending_map_);
+        pending_map_.reset();
       }
-      for (int j = 0; j < 3; ++j) {
-        edges.points.push_back(corners[j]);
-        edges.points.push_back(corners[(j + 1) % 3]);
+      const auto begin = std::chrono::steady_clock::now();
+      try
+      {
+        publishMap(snapshot);
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+                             "Map timing frames=%zu queue_wait=%.1f ms rebuild=%.1f ms", snapshot.frames.size(),
+                             std::chrono::duration<double, std::milli>(begin - snapshot.enqueued).count(),
+                             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+      }
+      catch (const std::exception &error)
+      {
+        if (!stopping_)
+          RCLCPP_ERROR(get_logger(), "Map rebuild failed: %s", error.what());
       }
     }
   }
-  // Reuse fixed marker IDs so each keyframe replaces the previous triangles.
-  // DELETE also clears an older display when this frame has no descriptors.
-  if (edges.points.empty()) {
-    edges.action = Marker::DELETE;
-    vertices.action = Marker::DELETE;
-  }
-  visualization_msgs::msg::MarkerArray markers;
-  markers.markers.push_back(std::move(edges));
-  markers.markers.push_back(std::move(vertices));
-  std_marker_pub_->publish(markers);
-}
 
-void LoopBackendNode::publishLoopMarkers(
-    const builtin_interfaces::msg::Time &stamp) {
-  visualization_msgs::msg::Marker line;
-  line.header.frame_id = "map";
-  line.header.stamp = stamp;
-  line.ns = "accepted_loops";
-  line.id = 0;
-  line.type = visualization_msgs::msg::Marker::LINE_LIST;
-  line.action = visualization_msgs::msg::Marker::ADD;
-  line.pose.orientation.w = 1.0;
-  line.scale.x = 0.15;
-  line.color.r = 0.0f;
-  line.color.g = 0.9f;
-  line.color.b = 0.3f;
-  line.color.a = 1.0f;
-  line.points.reserve(2 * loops_.size());
-  for (const auto &[historical, current] : loops_) {
-    for (const auto index : {historical, current}) {
-      const auto position = frames_[index].map_pose.translation();
-      geometry_msgs::msg::Point point;
-      point.x = position.x();
-      point.y = position.y();
-      point.z = position.z();
-      line.points.push_back(point);
-    }
-  }
-  visualization_msgs::msg::MarkerArray markers;
-  markers.markers.push_back(std::move(line));
-  marker_pub_->publish(markers);
-}
-
-}  // namespace super_lio_slam
+} // namespace super_lio_slam

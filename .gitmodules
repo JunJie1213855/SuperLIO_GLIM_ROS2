@@ -1,0 +1,3 @@
+[submodule "third_party/TEASER-plusplus"]
+	path = src/SuperLIO_SLAM/third_party/TEASER-plusplus
+	url = https://github.com/MIT-SPARK/TEASER-plusplus.git

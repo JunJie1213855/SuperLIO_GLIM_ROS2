@@ -51,6 +51,9 @@ loop_backend_node:
 
     # iSAM2 graph, corrected map, and repeated-loop suppression.
     loop_min_interval: 20
+    loop_candidate_mode: distance
+    loop_candidate_radius_m: 15.0
+    loop_min_time_separation_s: 30.0  # candidate stamp gap must be strictly greater
     loop_diagnostic_stride: 1  # 0 disables per-keyframe STD summaries
     graph_prior_translation_sigma: 0.001
     graph_prior_rotation_sigma: 0.001
@@ -60,6 +63,7 @@ loop_backend_node:
     graph_loop_rotation_sigma: 0.1
     graph_loop_huber_k: 1.345
     std_visualization_max_triangles: 100
+    registration_queue_capacity: 2
     map_publish_stride: 30
     map_max_keyframes: 2000
     map_max_points_per_keyframe: 1000

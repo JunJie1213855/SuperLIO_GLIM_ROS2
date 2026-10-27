@@ -7,6 +7,7 @@
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <pcl/common/io.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -325,7 +326,16 @@ public:
                   std::pair<int, double> &loop_result,
                   std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
                   std::vector<std::pair<STDesc, STDesc>> &loop_std_pair,
-                  STDSearchDiagnostics *diagnostics = nullptr);
+                  STDSearchDiagnostics *diagnostics = nullptr,
+                  const std::function<bool(int)>& candidate_allowed = {});
+
+  // Raw candidates, before the legacy triangle/plane pose gates. Search before AddSTDescs.
+  std::vector<STDMatchList> SearchCandidates(const std::vector<STDesc>& descriptors,
+                                           STDSearchDiagnostics* diagnostics = nullptr);
+
+  // Optional geometric hint; absence never rejects a raw candidate in the new backend.
+  bool CandidatePoseHint(const STDMatchList& candidate,
+                         std::pair<Eigen::Vector3d,Eigen::Matrix3d>& transform);
 
   // add descriptors to database
   void AddSTDescs(const std::vector<STDesc> &stds_vec);

@@ -6,7 +6,7 @@
 ## 工作区内容
 
 ```bash
-  SLAM_Merge_ws/
+  SuperLIO_GLIM_ROS2/
   ├── src/
   │   ├── SuperLIO_SLAM/  # SuperLIO、STD 回环检测、ICP 和 iSAM2 后端
   │   ├── glim/           # GLIM v1.2.2
@@ -320,3 +320,29 @@ python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
 - 导出器报最终轨迹缺少关键帧：先让 SuperLIO 后端处理完整并录制完最后一条路径，再重新导出。
 - 配准分数看起来不错但地图仍错位：回到 `Merge sessions` 调整 `source` 粗对齐，再运行 `fine registration`。
 
+
+## 项目整理与第三方依赖
+
+本项目采用同一工作区的两阶段流程：
+
+```text
+SuperLIO-SLAM 在线建图与回环优化
+    → 导出各会话的优化关键帧和位姿
+    → 转换为 GLIM dump
+    → GLIM Offline Viewer 配准、优化与合并子图
+```
+
+`src/SuperLIO_SLAM`、`src/glim`、`src/glim_ros2` 和 `tools` 都属于本项目，应一起保留。
+TEASER++ 上游源码位于 `src/SuperLIO_SLAM/third_party/TEASER-plusplus`，通过 Git submodule 固定版本。
+克隆后执行 `git submodule update --init --recursive`；具体说明见
+[src/SuperLIO_SLAM/third_party/README.md](src/SuperLIO_SLAM/third_party/README.md)。
+TEASER++ 已接入可选在线模式 `std_teaser_gicp`：单帧 STD 检索 → deque 多帧子图 FPFH → TEASER++ → GICP → iSAM2。默认仍为旧 `std_icp` 模式。构建前执行 `python3 src/tools/build_teaserpp.py --jobs 1`，运行时增加 `loop_registration_mode:=std_teaser_gicp`。详见 [SuperLIO 包说明](src/SuperLIO_SLAM/README.md)。
+
+2026-10-27 整理后，仅 Funny 参考源码和实验结果 `test/`、`savemap/`、`liomap/`
+保留在相邻 `../SuperLIO_GLIM_ROS2_archive_20261027/`，没有删除数据。
+该目录的 `moves.json` 标明哪些项目已经恢复。包内 `src/SuperLIO_SLAM/test/` 仍是在线测试代码。
+构建产物 `build/`、`install/`、`log/` 不进入源码版本管理。
+
+在线回环后端现已拆分关键帧/STD、配准和地图重建流水线。检测任务有界排队，
+过载淘汰旧检测任务，保留已接收的关键帧和里程计图节点；地图使用最新待处理快照。
+实现与性能日志说明见 [异步回环后端](docs/async_loop_backend.md)。

@@ -1,0 +1,40 @@
+# Runtime settings for loop_registration_mode:=std_teaser_gicp.
+# Defaults are experimental; calibrate on each sensor and bag before changing the default mode.
+loop_backend_node:
+  ros__parameters:
+    registration_submap_max_keyframes: 4
+    registration_submap_max_duration_s: 6.0
+    registration_submap_max_travel_distance_m: 6.0
+    std_registration_top_k: 3
+    registration_soft_budget_ms: 500.0  # stop starting further candidates; not a hard timeout
+    registration_voxel_size_m: 0.5
+    registration_min_points: 100
+    registration_max_source_points: 10000
+    registration_max_target_points: 50000
+    fpfh_normal_radius_m: 1.0
+    fpfh_feature_radius_m: 2.5
+    fpfh_distance_ratio_threshold: 0.9
+    fpfh_pose_hint_radius_m: 3.0  # optional STD hint; failed registration retries unguided
+    correspondence_min_unique: 6
+    correspondence_max_unique: 200
+    correspondence_min_baseline_m: 2.0
+    teaser_estimate_scaling: false
+    teaser_noise_bound_m: 0.3
+    teaser_rotation_max_iterations: 100
+    teaser_max_clique_time_limit_s: 0.05
+    teaser_max_clique_num_threads: 2
+    coarse_residual_threshold_m: 0.6
+    coarse_min_inliers: 6
+    coarse_min_inlier_ratio: 0.3
+    coarse_max_inlier_rmse_m: 0.3  # RMSE over coarse inliers, not ground-truth pose error
+    gicp_max_iterations: 40
+    gicp_correspondence_randomness: 20
+    gicp_max_correspondence_distance_m: 2.0
+    quality_nn_radius_m: 1.0
+    quality_min_source_overlap: 0.35
+    quality_min_current_frame_overlap: 0.35
+    quality_min_inlier_count: 100
+    quality_max_inlier_mse_m2: 0.25
+    quality_min_information_ratio: 0.00001
+    quality_max_refinement_translation_m: 5.0
+    quality_max_refinement_rotation_deg: 20.0

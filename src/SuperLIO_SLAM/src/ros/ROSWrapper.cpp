@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <pcl/console/print.h>
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 
 
@@ -534,7 +537,29 @@ void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr ms
   case LID_TYPE::VELO32:
   {
     pcl::PointCloud<velodyne_ros::Point> pl_orig;
-    pcl::fromROSMsg(*msg, pl_orig);
+    const bool has_time=std::any_of(msg->fields.begin(),msg->fields.end(),
+        [](const auto& field){return field.name=="time";});
+    if (has_time) {
+      pcl::fromROSMsg(*msg, pl_orig);
+    } else {
+      // Avoid changing PCL's global verbosity: suppress only this missing field.
+      static const bool warn_missing_time=[] {
+        const char* value=std::getenv("SUPERLIO_WARN_MISSING_TIME");
+        return !value || !(std::strcmp(value,"0")==0 ||
+                          std::strcmp(value,"false")==0 ||
+                          std::strcmp(value,"off")==0);
+      }();
+      if (warn_missing_time) PCL_WARN("Failed to find match for field 'time'.\n");
+      pcl::PointCloud<pcl::PointXYZI> untimed;
+      pcl::fromROSMsg(*msg,untimed);
+      pl_orig.resize(untimed.size());
+      for (std::size_t i=0;i<untimed.size();++i) {
+        const auto& point=untimed[i];
+        auto& output=pl_orig[i];
+        output.x=point.x; output.y=point.y; output.z=point.z;
+        output.intensity=point.intensity; output.time=0.0f;
+      }
+    }
     lidar_data.pc->reserve(pl_orig.size() / g_filter_rate + 1);
     lidar_data.start_time = stampToSec(msg->header.stamp);
 
@@ -544,7 +569,8 @@ void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr ms
       lidar_data.pc->emplace_back(
           pt.x, pt.y, pt.z, pt.intensity, pt.time);
     }
-    lidar_data.end_time = lidar_data.start_time + lidar_data.pc->points.back().offset_time;
+    lidar_data.end_time = lidar_data.start_time +
+        (lidar_data.pc->empty() ? 0.0 : lidar_data.pc->points.back().offset_time);
     break;
   }
   case OUSTER:

@@ -1,44 +1,26 @@
-import os
-import launch.logging
-from ament_index_python.packages import get_package_share_directory
+"""Mapping profile for livox_360.yaml; all backend options come from slam.launch.py."""
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
-from launch.conditions import IfCondition
-from launch_ros.actions import Node
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
+
 
 def generate_launch_description():
-    pkg_super_lio = get_package_share_directory('super_lio_slam')
-    config_yaml = os.path.join(pkg_super_lio, 'config', 'livox_360.yaml')
-    rviz_config_file = os.path.join(pkg_super_lio, 'rviz', 'lio.rviz')
-
-    declare_rviz_arg = DeclareLaunchArgument(
-        'rviz',
-        default_value='true',
-        description='Whether to start RVIZ2'
-    )
-    rviz_flag = LaunchConfiguration('rviz')
-
-    super_lio_node = Node(
-        package='super_lio_slam',
-        executable='super_lio_node',
-        name='super_lio_node',
-        output='screen',
-        parameters=[config_yaml],
-        arguments=['--ros-args', '--log-level', 'info']
-    )
-
-    rviz2_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='super_lio_slam',
-        arguments=['-d', rviz_config_file, '--ros-args', '--log-level', 'warn'],
-        condition=IfCondition(rviz_flag)
-    )
-
-    ld = LaunchDescription()
-    ld.add_action(declare_rviz_arg)
-    ld.add_action(super_lio_node)
-    ld.add_action(rviz2_node)
-
-    return ld
+    share = FindPackageShare('super_lio_slam')
+    return LaunchDescription([
+        DeclareLaunchArgument('sensor_config', default_value=PathJoinSubstitution(
+            [share, 'config', 'livox_360.yaml'])),
+        DeclareLaunchArgument('slam_config', default_value=PathJoinSubstitution(
+            [share, 'config', 'slam.yaml'])),
+        DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution([share, 'launch', 'slam.launch.py'])),
+            launch_arguments={
+                'sensor_config': LaunchConfiguration('sensor_config'),
+                'slam_config': LaunchConfiguration('slam_config'),
+                'rviz': LaunchConfiguration('rviz'),
+            }.items(),
+        ),
+    ])

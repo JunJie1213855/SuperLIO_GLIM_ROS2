@@ -25,12 +25,41 @@ find_package(livox_ros_driver2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 find_package(Eigen3 REQUIRED NO_MODULE)
-find_package(PCL REQUIRED COMPONENTS common io filters kdtree registration)
+find_package(PCL REQUIRED COMPONENTS common io filters kdtree registration features search)
 find_package(Glog REQUIRED)
 find_package(gflags REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(OpenMP REQUIRED)
+
+option(SUPERLIO_WITH_TEASER "Build the multi-frame TEASER++ / GICP backend" ON)
+if(SUPERLIO_WITH_TEASER)
+  find_package(teaserpp CONFIG REQUIRED HINTS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../install/teaserpp")
+endif()
+
+# Record the actual libraries selected by CMake, for isolated launch-time lookup.
+# ROS and /usr/local can both provide libgtsam.so.4 with incompatible ABIs.
+set(SUPERLIO_RUNTIME_LIBRARY_DIRS "$<TARGET_FILE_DIR:gtsam>")
+if(SUPERLIO_WITH_TEASER)
+  string(APPEND SUPERLIO_RUNTIME_LIBRARY_DIRS "\n$<TARGET_FILE_DIR:teaserpp::teaser_registration>")
+endif()
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/runtime_library_dirs.txt"
+  CONTENT "${SUPERLIO_RUNTIME_LIBRARY_DIRS}\n")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/runtime_library_dirs.txt"
+  DESTINATION share/${PROJECT_NAME}/config)
+
+add_library(submap_registration STATIC
+  src/loop/SubmapWindow.cpp
+  src/loop/TeaserCoarseRegistration.cpp
+  src/loop/GicpRegistration.cpp)
+target_include_directories(submap_registration PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include ${PCL_INCLUDE_DIRS})
+target_link_libraries(submap_registration PUBLIC Eigen3::Eigen ${PCL_LIBRARIES})
+if(SUPERLIO_WITH_TEASER)
+  target_compile_definitions(submap_registration PUBLIC SUPERLIO_WITH_TEASER)
+  target_link_libraries(submap_registration PUBLIC teaserpp::teaser_registration)
+endif()
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CloudPose.msg"
@@ -106,7 +135,7 @@ ament_target_dependencies(loop_backend_node
   rclcpp std_msgs sensor_msgs geometry_msgs visualization_msgs nav_msgs
   pcl_conversions tf2_ros rosidl_default_runtime)
 target_link_libraries(loop_backend_node
-  std_descriptor_core Eigen3::Eigen ${PCL_LIBRARIES} gtsam
+  submap_registration std_descriptor_core Eigen3::Eigen ${PCL_LIBRARIES} gtsam
   ${cpp_typesupport_target})
 
 install(TARGETS basic_core std_descriptor_core lio
@@ -127,3 +156,10 @@ install(DIRECTORY rviz/ DESTINATION share/${PROJECT_NAME}/rviz)
 
 ament_export_dependencies(rosidl_default_runtime)
 ament_package()
+
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(submap_registration_test test/submap_registration_test.cpp)
+  target_link_libraries(submap_registration_test PRIVATE submap_registration)
+  add_test(NAME submap_registration_test COMMAND submap_registration_test)
+endif()

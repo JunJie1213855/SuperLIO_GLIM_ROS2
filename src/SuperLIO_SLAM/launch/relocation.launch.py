@@ -1,44 +1,36 @@
-import os
-import launch.logging
-from ament_index_python.packages import get_package_share_directory
+"""Run map-based relocation with configurable sensor parameters and ROS time."""
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
+from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
+
 
 def generate_launch_description():
-    pkg_super_lio = get_package_share_directory('super_lio_slam')
-    config_yaml = os.path.join(pkg_super_lio, 'config', 'robosense_airy.yaml')
-    rviz_config_file = os.path.join(pkg_super_lio, 'rviz', 'relocation.rviz')
-
-    declare_rviz_arg = DeclareLaunchArgument(
-        'rviz',
-        default_value='true',
-        description='Whether to start RVIZ2'
-    )
-    rviz_flag = LaunchConfiguration('rviz')
-
-    super_lio_node = Node(
-        package='super_lio_slam',
-        executable='relocation_node',
-        name='relocation_node',
-        output='screen',
-        parameters=[config_yaml],
-        arguments=['--ros-args', '--log-level', 'info']
-    )
-
-    rviz2_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='super_lio_slam',
-        arguments=['-d', rviz_config_file, '--ros-args', '--log-level', 'warn'],
-        condition=IfCondition(rviz_flag)
-    )
-
-    ld = LaunchDescription()
-    ld.add_action(declare_rviz_arg)
-    ld.add_action(super_lio_node)
-    ld.add_action(rviz2_node)
-
-    return ld
+    share = FindPackageShare('super_lio_slam')
+    use_sim_time = ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)
+    return LaunchDescription([
+        DeclareLaunchArgument('sensor_config', default_value=PathJoinSubstitution(
+            [share, 'config', 'robosense_airy.yaml'])),
+        DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
+        DeclareLaunchArgument('rviz_config', default_value=PathJoinSubstitution(
+            [share, 'rviz', 'relocation.rviz'])),
+        DeclareLaunchArgument('log_level', default_value='info'),
+        DeclareLaunchArgument('rviz_log_level', default_value='warn'),
+        Node(
+            package='super_lio_slam', executable='relocation_node', name='relocation_node', namespace='',
+            output='screen', parameters=[LaunchConfiguration('sensor_config'), {'use_sim_time': use_sim_time}],
+            arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
+        ),
+        Node(
+            package='rviz2', executable='rviz2', name='super_lio_slam_rviz', namespace='', output='screen',
+            condition=IfCondition(LaunchConfiguration('rviz')),
+            arguments=['-d', LaunchConfiguration('rviz_config'), '--ros-args', '--log-level',
+                       LaunchConfiguration('rviz_log_level')],
+            parameters=[{'use_sim_time': use_sim_time}],
+        ),
+    ])

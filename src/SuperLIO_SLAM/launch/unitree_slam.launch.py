@@ -1,4 +1,4 @@
-"""Run Super-LIO + STD/ICP/PGO with a Unitree UniLiDAR L1."""
+"""Mapping profile for unitree_l1.yaml; all backend options come from slam.launch.py."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -10,17 +10,17 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     share = FindPackageShare('super_lio_slam')
     return LaunchDescription([
-        DeclareLaunchArgument('rviz', default_value='true'),
-        DeclareLaunchArgument('use_sim_time', default_value='false'),
+        DeclareLaunchArgument('sensor_config', default_value=PathJoinSubstitution(
+            [share, 'config', 'unitree_l1.yaml'])),
+        DeclareLaunchArgument('slam_config', default_value=PathJoinSubstitution(
+            [share, 'config', 'unitree_slam.yaml'])),
+        DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution([share, 'launch', 'slam.launch.py'])
-            ),
+            PythonLaunchDescriptionSource(PathJoinSubstitution([share, 'launch', 'slam.launch.py'])),
             launch_arguments={
-                'sensor_config': PathJoinSubstitution([share, 'config', 'unitree_l1.yaml']),
-                'slam_config': PathJoinSubstitution([share, 'config', 'unitree_slam.yaml']),
+                'sensor_config': LaunchConfiguration('sensor_config'),
+                'slam_config': LaunchConfiguration('slam_config'),
                 'rviz': LaunchConfiguration('rviz'),
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
             }.items(),
         ),
     ])

@@ -349,7 +349,8 @@ void STDescManager::SearchLoop(
     const std::vector<STDesc> &stds_vec, std::pair<int, double> &loop_result,
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> &loop_transform,
     std::vector<std::pair<STDesc, STDesc>> &loop_std_pair,
-    STDSearchDiagnostics *diagnostics) {
+    STDSearchDiagnostics *diagnostics,
+    const std::function<bool(int)>& candidate_allowed) {
 
   if (diagnostics) *diagnostics = STDSearchDiagnostics{};
   loop_result = std::pair<int, double>(-1, 0);
@@ -372,6 +373,7 @@ void STDescManager::SearchLoop(
   std::pair<Eigen::Vector3d, Eigen::Matrix3d> best_transform;
   std::vector<std::pair<STDesc, STDesc>> best_sucess_match_vec;
   for (size_t i = 0; i < candidate_matcher_vec.size(); i++) {
+    if (candidate_allowed && !candidate_allowed(candidate_matcher_vec[i].match_id_.second)) continue;
     double verify_score = -1;
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> relative_pose;
     std::vector<std::pair<STDesc, STDesc>> sucess_match_vec;
@@ -403,6 +405,23 @@ void STDescManager::SearchLoop(
     loop_std_pair = best_sucess_match_vec;
     return;
   }
+}
+
+bool STDescManager::CandidatePoseHint(const STDMatchList& candidate,
+    std::pair<Eigen::Vector3d,Eigen::Matrix3d>& transform) {
+  double score=-1;
+  int votes=0;
+  std::vector<std::pair<STDesc,STDesc>> matches;
+  candidate_verify(candidate,score,transform,matches,&votes);
+  return votes>=4 && transform.first.allFinite() && transform.second.allFinite();
+}
+
+std::vector<STDMatchList> STDescManager::SearchCandidates(
+    const std::vector<STDesc>& descriptors, STDSearchDiagnostics* diagnostics) {
+  if (diagnostics) *diagnostics = STDSearchDiagnostics{};
+  std::vector<STDMatchList> candidates;
+  if (!descriptors.empty()) candidate_selector(descriptors, candidates, diagnostics);
+  return candidates;
 }
 
 void STDescManager::AddSTDescs(const std::vector<STDesc> &stds_vec) {

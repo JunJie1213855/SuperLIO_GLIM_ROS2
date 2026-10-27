@@ -49,3 +49,9 @@ dump_*/
 # Runtime logs
 *.log
 logs/
+
+# Independent build verification and generated results
+/build_standalone/
+/install_standalone/
+/log_standalone/
+/results/

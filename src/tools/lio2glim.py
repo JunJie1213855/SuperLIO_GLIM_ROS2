@@ -25,8 +25,8 @@ T_lidar_imu 填单位阵即可自洽。
     ├── 000000/{data.txt, points_compact.bin, covs_compact.bin, imu_rate.txt}
     └── ...
 
-不生成 graph.bin / values.bin —— GLIM 加载时会自动走 recover_graph()，
-用各子图 data.txt 的 T_world_origin 定位并从体素图重建配准因子。
+默认生成 graph.bin / values.bin 和 config，用各子图 data.txt 的
+T_world_origin 定位；--no-graph 只用于调试，不保证正常加载。
 """
 
 import argparse
@@ -205,6 +205,14 @@ def rot2quat(R):
             (R[1, 0] - R[0, 1]) / s]
 
 
+def workspace_root():
+    """Support tools/ and src/tools/ without assuming a fixed parent depth."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "src/glim/src/glim/util/export_factors.cpp").is_file():
+            return parent
+    raise FileNotFoundError("Cannot locate workspace src/glim/src/glim/util/export_factors.cpp")
+
+
 def build_graph_writer(force=False):
     """按需编译 tools/glim_graph_writer.cpp，返回可执行文件路径。
 
@@ -213,7 +221,7 @@ def build_graph_writer(force=False):
     """
     import subprocess
     tools = Path(__file__).resolve().parent
-    repo = tools.parent
+    repo = workspace_root() / "src/glim"
     src = tools / "glim_graph_writer.cpp"
     exports = repo / "src/glim/util/export_factors.cpp"
     exe = tools / "glim_graph_writer"
@@ -265,8 +273,8 @@ def write_graph(out, subs, helper):
 
 def default_config_dir():
     """优先用 install 里那份（与包内一致），退回源码目录。"""
-    repo = Path(__file__).resolve().parent.parent
-    ws = repo.parent.parent
+    ws = workspace_root()
+    repo = ws / "src/glim"
     for c in (ws / "install/glim/share/glim/config", repo / "config"):
         if c.is_dir():
             return c
@@ -336,7 +344,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="PCD 序列 + TUM 位姿 → GLIM dump",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="示例：\n  python3 tools/lio2glim.py --poses poses.txt "
+        epilog="示例：\n  python3 src/tools/lio2glim.py --poses poses.txt "
                "--clouds clouds/ --out /tmp/dump_out")
     ap.add_argument("--poses", required=True, help="TUM 格式位姿文件")
     ap.add_argument("--clouds", required=True,

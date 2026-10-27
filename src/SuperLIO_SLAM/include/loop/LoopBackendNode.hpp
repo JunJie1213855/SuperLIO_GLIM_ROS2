@@ -1,5 +1,11 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <optional>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -21,6 +27,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "STDesc.h"
+#include "loop/SubmapRegistration.hpp"
 #include "super_lio_slam/msg/key_frame.hpp"
 
 namespace super_lio_slam {
@@ -28,6 +35,7 @@ namespace super_lio_slam {
 class LoopBackendNode final : public rclcpp::Node {
  public:
   LoopBackendNode();
+  ~LoopBackendNode() override;
 
  private:
   using Cloud = pcl::PointCloud<pcl::PointXYZI>;
@@ -47,23 +55,48 @@ class LoopBackendNode final : public rclcpp::Node {
     double overlap = 0.0;
   };
 
+  struct RegistrationCandidate {
+    std::size_t historical_index = 0;
+    SubmapWindow target_window;
+    std::vector<Frame> legacy_frames;
+    gtsam::Pose3 legacy_anchor;
+    std::pair<Eigen::Vector3d, Eigen::Matrix3d> proposal;
+  };
+  struct RegistrationTask {
+    std::size_t index = 0;
+    CloudPtr current_cloud;
+    SubmapWindow source_window;
+    std::vector<RegistrationCandidate> candidates;
+    std::chrono::steady_clock::time_point enqueued;
+  };
+  struct MapSnapshot {
+    std::vector<Frame> frames;
+    builtin_interfaces::msg::Time stamp;
+    std::chrono::steady_clock::time_point enqueued;
+  };
+  void registrationWorker();
+  void mapWorker();
+  void enqueueRegistration(RegistrationTask task);
+  bool loopTimeEligible(const builtin_interfaces::msg::Time& current,
+                        std::size_t historical) const; // graph_mutex_ held
+  void commitLoop(std::size_t index, std::size_t historical,
+                  const IcpObservation& observation);
+  void requestMap(const builtin_interfaces::msg::Time& stamp);
+
   void onKeyFrame(const super_lio_slam::msg::KeyFrame::SharedPtr msg);
   CloudPtr convertAndFilter(const sensor_msgs::msg::PointCloud2 &message) const;
   CloudPtr downsample(const CloudPtr &cloud, double voxel_size,
                       std::size_t max_points) const;
-  CloudPtr historicalSubmap(std::size_t historical_index) const;
   std::unique_ptr<IcpObservation> verifyWithIcp(
-      const CloudPtr &current_cloud, std::size_t current_index,
+      const CloudPtr &current_cloud, const CloudPtr &target, std::size_t current_index,
       std::size_t historical_index,
       const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const;
 
-  void addGraphNode(std::size_t index, const gtsam::Pose3 &raw_pose,
-                    const std::unique_ptr<IcpObservation> &loop,
-                    std::size_t historical_index);
+  void addGraphNode(std::size_t index, const gtsam::Pose3 &raw_pose);
   void publishCurrent(std::size_t index, bool loop_accepted);
-  void publishMapToWorld(const builtin_interfaces::msg::Time &stamp);
+  void publishMapToWorld();
   void publishPath(const builtin_interfaces::msg::Time &stamp);
-  void publishMap(const builtin_interfaces::msg::Time &stamp);
+  void publishMap(const MapSnapshot& snapshot);
   void publishLoopMarkers(const builtin_interfaces::msg::Time &stamp);
   void publishStdTriangles(std::size_t index,
                            const std::vector<STDesc> &descriptors);
@@ -71,6 +104,17 @@ class LoopBackendNode final : public rclcpp::Node {
   static gtsam::Pose3 poseFromMsg(const geometry_msgs::msg::Pose &pose);
   static geometry_msgs::msg::Pose poseToMsg(const gtsam::Pose3 &pose);
 
+  std::unique_ptr<IcpObservation> verifySubmaps(
+      const SubmapWindow& source, const SubmapWindow& target, const CloudPtr& current_cloud,
+      std::size_t historical_index, const Eigen::Matrix4d* hint) const;
+  std::string registration_mode_;
+  std::string candidate_mode_;
+  double candidate_radius_m_ = 15.0;
+  SubmapLimits submap_limits_;
+  SubmapWindow source_window_;
+  RegistrationSettings registration_settings_;
+  int registration_top_k_ = 3;
+  double registration_budget_ms_ = 500.0;
   STDescManager std_manager_;
   std::vector<Frame> frames_;
   std::vector<std::pair<std::size_t, std::size_t>> loops_;
@@ -106,6 +150,7 @@ class LoopBackendNode final : public rclcpp::Node {
   int icp_max_source_points_ = 10000;
   int icp_max_target_points_ = 50000;
   int loop_min_interval_ = 20;
+  double loop_min_time_separation_s_ = 30.0;
   int loop_diagnostic_stride_ = 1;
   int map_publish_stride_ = 30;
   int map_max_keyframes_ = 2000;
@@ -118,7 +163,20 @@ class LoopBackendNode final : public rclcpp::Node {
   bool have_loop_ = false;
   bool have_input_id_ = false;
   uint32_t last_input_id_ = 0;
-  bool backend_faulted_ = false;
+  std::atomic<bool> backend_faulted_{false};
+  // Graph and published pose state are short-held; no registration/map work under this mutex.
+  std::mutex graph_mutex_;
+  std::mutex registration_mutex_;
+  std::condition_variable registration_cv_;
+  std::deque<RegistrationTask> registration_tasks_;
+  std::size_t registration_queue_capacity_ = 2;
+  std::size_t registration_tasks_dropped_ = 0;
+  std::mutex map_mutex_;
+  std::condition_variable map_cv_;
+  std::optional<MapSnapshot> pending_map_;
+  std::thread registration_thread_;
+  std::thread map_thread_;
+  std::atomic<bool> stopping_{false};
 };
 
 }  // namespace super_lio_slam
