@@ -64,6 +64,10 @@ namespace super_lio_slam
              sv[0] > 1e-6 && sv[1] / sv[0] > 1e-3; // allow planes, reject near-collinear inputs
     }
   } // namespace
+
+
+
+  // 粗配准实现
   RegistrationResult coarseRegister(const RegistrationCloud::ConstPtr &source,
                                     const RegistrationCloud::ConstPtr &target,
                                     const RegistrationSettings &s, const Eigen::Matrix4d *hint)

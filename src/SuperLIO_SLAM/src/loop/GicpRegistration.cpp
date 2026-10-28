@@ -20,6 +20,7 @@ namespace super_lio_slam
     };
   }
 
+  // 精配准
   RegistrationResult refineRegister(const RegistrationCloud::ConstPtr &source,
                                     const RegistrationCloud::ConstPtr &target,
                                     const RegistrationCloud::ConstPtr &current,
@@ -42,16 +43,25 @@ namespace super_lio_slam
         source->size() < static_cast<std::size_t>(s.min_points) || target->size() < static_cast<std::size_t>(s.min_points) ||
         std::min(source->size(), target->size()) <= static_cast<std::size_t>(s.covariance_neighbors))
       return finish("few_gicp_points");
+
+    // 粗配准作为初始值
     const Eigen::Matrix4d coarse = out.transform;
+
+    // gicp 精配准
     InspectableGicp gicp;
+    // 设置输入输出
     gicp.setInputSource(source);
     gicp.setInputTarget(target);
+
+    // 设置迭代参数
     gicp.setMaximumIterations(s.max_iterations);
     gicp.setCorrespondenceRandomness(s.covariance_neighbors);
     gicp.setMaxCorrespondenceDistance(s.correspondence_distance);
     gicp.setTransformationEpsilon(1e-6);
     gicp.setEuclideanFitnessEpsilon(1e-6);
     RegistrationCloud aligned;
+
+    // 开始对齐
     gicp.align(aligned, coarse.cast<float>());
     out.transform = gicp.getFinalTransformation().cast<double>(); // already includes coarse initial guess
     if (!gicp.hasConverged() || aligned.empty() || !validRigidTransform(out.transform))
@@ -62,6 +72,7 @@ namespace super_lio_slam
       return finish("excessive_refinement");
     pcl::KdTreeFLANN<pcl::PointXYZI> tree;
     tree.setInputCloud(target);
+    // 配准质量
     auto quality = [&](const RegistrationCloud &points, double &mse)
     {
       std::size_t count = 0;

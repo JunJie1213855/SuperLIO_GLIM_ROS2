@@ -59,9 +59,10 @@ namespace super_lio_slam
 
     // 闭环检测候选方法选择：std 和 distance
     candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "std");
-    // 两个选项
+    // 两个选项，两个都不是直接丢异常
     if (candidate_mode_ != "distance" && candidate_mode_ != "std")
       throw std::invalid_argument("loop_candidate_mode must be distance or std");
+    // 闭环整体方法，默认为 std + teaserpp + gicp 方法
     registration_mode_ = declare_parameter<std::string>("loop_registration_mode", "std_teaser_gicp");
     if (registration_mode_ != "std_gicp" && registration_mode_ != "std_teaser_gicp")
       throw std::invalid_argument("loop_registration_mode must be std_gicp or std_teaser_gicp");
@@ -70,7 +71,7 @@ namespace super_lio_slam
       throw std::invalid_argument("std_teaser_gicp requires a build with SUPERLIO_WITH_TEASER=ON");
 #endif
 
-    // 是否大于 0
+    // 辅助函数：返回大于 0 的值
     auto positive = [this](const char *name, double value)
     {
       const double result = declare_parameter<double>(name, value);
@@ -78,7 +79,7 @@ namespace super_lio_slam
         throw std::invalid_argument(std::string(name) + " must be finite and positive");
       return result;
     };
-    // 是否在区间内
+    // 辅助函数：返回在区间内的值
     auto bounded = [this](const char *name, int value, int low, int high)
     {
       const int result = declare_parameter<int>(name, value);
@@ -171,7 +172,7 @@ namespace super_lio_slam
     const double loop_rot = declare_parameter<double>("graph_loop_rotation_sigma", 0.05);
     const double huber_k = declare_parameter<double>("graph_loop_huber_k", 1.5);
 
-    // iSAM2 噪声设置
+    // iSAM2 PGO的噪声协方差设置
     prior_noise_ = gtsam::noiseModel::Diagonal::Sigmas(
         poseSigmas(std::max(1e-6, prior_rot), std::max(1e-6, prior_trans)));
     odom_noise_ = gtsam::noiseModel::Diagonal::Sigmas(
@@ -219,6 +220,8 @@ namespace super_lio_slam
     rclcpp::SubscriptionOptions time_options;
     time_options.callback_group = tf_callback_group_;
     const auto time_qos = rclcpp::QoS(rclcpp::KeepLast(100)).best_effort();
+
+    // 订阅 superlio 的位姿和关键帧
     frontend_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         "/lio/odom", time_qos,
         std::bind(&LoopBackendNode::onFrontendOdometry, this, std::placeholders::_1),
@@ -227,11 +230,11 @@ namespace super_lio_slam
         "/lio/imu/odom", time_qos,
         std::bind(&LoopBackendNode::onFrontendOdometry, this, std::placeholders::_1),
         time_options);
-    // 关键帧订阅
+    // 关键帧订阅：重要
     keyframe_sub_ = create_subscription<super_lio_slam::msg::KeyFrame>(
         "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
         std::bind(&LoopBackendNode::onKeyFrame, this, std::placeholders::_1));
-    // 配准县城
+    // 配准线程
     registration_thread_ = std::thread(&LoopBackendNode::registrationWorker, this);
     try
     {
@@ -404,7 +407,11 @@ namespace super_lio_slam
     const auto source = source_window.cloud(settings.voxel, settings.max_source);
     const auto target = target_window.cloud(settings.voxel, settings.max_target);
     const auto current = downsample(current_cloud, settings.voxel, settings.max_source);
+
+    // Teaser++ 粗配准
     auto result = coarseRegister(source, target, settings, hint);
+
+    // 如果可以接受，就进行精配准，采用 GICP
     if (result.accepted)
       result = refineRegister(source, target, current, settings, result);
     // Hints reduce repeated-structure ambiguity but never gate candidate admission.
@@ -441,6 +448,7 @@ namespace super_lio_slam
     }
     if (!result.accepted)
       return nullptr;
+    // 如果精配准可以接受，那么将其进行传出
     auto observation = std::make_unique<RegistrationObservation>();
     observation->historical_from_current = gtsam::Pose3(result.transform);
     observation->fitness = result.mse;
@@ -465,6 +473,7 @@ namespace super_lio_slam
                                                      raw_delta, odom_noise_));
       initial.insert(index, frames_[index - 1].map_pose.compose(raw_delta));
     }
+    // 更新因子图
     isam_.update(factors, initial);
     frames_[index].map_pose = isam_.calculateEstimate<gtsam::Pose3>(index);
     {
@@ -492,7 +501,7 @@ namespace super_lio_slam
     try
     {
       raw_pose = poseFromMsg(msg->odom_pose);
-      cloud = convertAndFilter(msg->cloud);
+      cloud = convertAndFilter(msg->cloud);   // 转换为 pcl 格式，并且降采样
     }
     catch (const std::exception &error)
     {
@@ -500,7 +509,7 @@ namespace super_lio_slam
                   error.what());
       return;
     }
-    if (cloud->size() < 10)
+    if (cloud->size() < 10) // 去除点数少的点云
     {
       RCLCPP_WARN(get_logger(), "Ignoring sparse keyframe %u (%zu points)",
                   msg->id, cloud->size());
@@ -539,7 +548,8 @@ namespace super_lio_slam
         return;
       }
     }
-    // 注册一个配准任务
+
+    // 注册一个配准任务，让配准线程执行
     RegistrationTask task;
     task.index = index;
     task.current_cloud = cloud;
@@ -552,7 +562,7 @@ namespace super_lio_slam
     bool adding_descriptors = false;
     double descriptor_ms = 0.0;
     const auto std_begin = std::chrono::steady_clock::now();
-    if (candidate_mode_ == "distance") // 距离候选
+    if (candidate_mode_ == "distance") // 采用距离决定候选帧
     {
       if (enough_time_since_loop)
       {
@@ -561,17 +571,17 @@ namespace super_lio_slam
         std::lock_guard<std::mutex> lock(graph_mutex_);
         for (std::size_t h = 0; h < index; ++h)
         {
-          if (!loopCandidateEligible(msg->header.stamp, raw_pose, h))
+          if (!loopCandidateEligible(msg->header.stamp, raw_pose, h)) // 检测是否在两帧的时间是否过短
             continue;
           const double distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
-          if (distance <= candidate_radius_m_)
+          if (distance <= candidate_radius_m_)                        // 检测两帧距离满足阈值
             nearest.emplace_back(distance, h);
         }
-        std::sort(nearest.begin(), nearest.end());
+        std::sort(nearest.begin(), nearest.end()); // 从最小的开始配准
         std::vector<std::size_t> selected;
         for (const auto &[distance, h] : nearest)
         {
-          if (selected.size() >= static_cast<std::size_t>(registration_top_k_))
+          if (selected.size() >= static_cast<std::size_t>(registration_top_k_))  // 有足够多的帧就跳出循环
             break;
           if (std::any_of(selected.begin(), selected.end(), [h](std::size_t previous)
                           { return h > previous ? h - previous <= 2 : previous - h <= 2; }))
@@ -583,11 +593,11 @@ namespace super_lio_slam
           match.have_pose_hint = true;
           if (registration_mode_ == "std_teaser_gicp")
           {
-            match.target_window = SubmapWindow(submap_limits_);
+            match.target_window = SubmapWindow(submap_limits_); // 添加目标子图
             const std::size_t first = h + 1 > static_cast<std::size_t>(submap_limits_.max_frames)
                                           ? h + 1 - submap_limits_.max_frames
                                           : 0;
-            for (std::size_t j = first; j <= h; ++j)
+            for (std::size_t j = first; j <= h; ++j)            // 添加多帧子图
             {
               const auto &frame = frames_[j];
               match.target_window.append({j, rclcpp::Time(frame.stamp).seconds(),
@@ -617,7 +627,7 @@ namespace super_lio_slam
       try
       {
         // Only this callback owns STD state; workers consume immutable snapshots.
-        std_manager_.GenerateSTDescs(cloud, descriptors);
+        std_manager_.GenerateSTDescs(cloud, descriptors); // 生成 STD 描述子
         descriptor_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - std_begin)
                             .count();
@@ -625,7 +635,7 @@ namespace super_lio_slam
         {
           if (registration_mode_ == "std_teaser_gicp")
           {
-            const auto candidates = std_manager_.SearchCandidates(descriptors);
+            const auto candidates = std_manager_.SearchCandidates(descriptors); // 查看候选
             std::vector<int> tried;
             for (const auto &candidate : candidates)
             {
@@ -636,7 +646,7 @@ namespace super_lio_slam
               double time_gap;
               {
                 std::lock_guard<std::mutex> lock(graph_mutex_);
-                if (!loopCandidateEligible(msg->header.stamp, raw_pose, static_cast<std::size_t>(h)))
+                if (!loopCandidateEligible(msg->header.stamp, raw_pose, static_cast<std::size_t>(h)))    // 时间检测
                   continue;
                 candidate_distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
                 time_gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
@@ -669,7 +679,7 @@ namespace super_lio_slam
                           "STD %d -> %zu matched: time_gap=%.3f s (> %.3f) distance=%.2f m (<= %.2f) hint=%s std_pairs=%zu",
                           h, index, time_gap, loop_min_time_separation_s_, candidate_distance,
                           candidate_radius_m_, match.have_pose_hint ? "STD" : "none", candidate.match_list_.size());
-              task.candidates.push_back(std::move(match));
+              task.candidates.push_back(std::move(match)); // 添加配准任务
             }
           }
           else if (!std_manager_.plane_cloud_vec_.empty() &&
@@ -697,12 +707,12 @@ namespace super_lio_slam
               match.odom_hint = match.local_anchor.between(raw_pose).matrix();
               match.local_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
               RCLCPP_INFO(get_logger(), "STD %zu -> %zu matched: score=%.3f", match.historical_index, index, result.second);
-              task.candidates.push_back(std::move(match));
+              task.candidates.push_back(std::move(match)); // 添加配准任务
             }
           }
         }
         adding_descriptors = true;
-        std_manager_.AddSTDescs(descriptors);
+        std_manager_.AddSTDescs(descriptors); // 把描述子添加到集合中
       }
       catch (const std::exception &error)
       {
@@ -722,6 +732,8 @@ namespace super_lio_slam
                               .count();
     {
       std::lock_guard<std::mutex> lock(graph_mutex_);
+
+      // 帧：包含位姿、对应的点云
       Frame frame;
       frame.input_id = msg->id;
       frame.stamp = msg->header.stamp;
@@ -731,7 +743,7 @@ namespace super_lio_slam
       try
       {
         // Every ingested keyframe receives an odometry factor, regardless of queue overload.
-        addGraphNode(index, raw_pose);
+        addGraphNode(index, raw_pose);          // 添加因子节点
         publishCurrent(index, false);
         publishStdTriangles(index, descriptors);
       }
@@ -742,10 +754,11 @@ namespace super_lio_slam
         return;
       }
     }
+
     source_window_ = std::move(pending_window);
     last_input_id_ = msg->id;
     have_input_id_ = true;
-    // 加入配准人物
+    // 任务入队
     if (!task.candidates.empty())
       enqueueRegistration(std::move(task));
     std::size_t queued, dropped;
@@ -995,12 +1008,12 @@ namespace super_lio_slam
 
   void LoopBackendNode::enqueueRegistration(RegistrationTask task)
   {
-    task.enqueued = std::chrono::steady_clock::now();
+    task.enqueued = std::chrono::steady_clock::now(); // 入队时间
     {
       std::lock_guard<std::mutex> lock(registration_mutex_);
       if (stopping_)
         return;
-      if (registration_tasks_.size() >= registration_queue_capacity_)
+      if (registration_tasks_.size() >= registration_queue_capacity_) // 大于了容量，就把最前面的任务弹出去
       {
         registration_tasks_.pop_front();
         ++registration_tasks_dropped_;
@@ -1008,9 +1021,9 @@ namespace super_lio_slam
                              "Registration queue full: capacity=%zu dropped_tasks=%zu (keyframes retained)",
                              registration_queue_capacity_, registration_tasks_dropped_);
       }
-      registration_tasks_.push_back(std::move(task));
+      registration_tasks_.push_back(std::move(task)); // 任务入队
     }
-    registration_cv_.notify_one();
+    registration_cv_.notify_one(); // 唤醒配准线程
   }
 
   void LoopBackendNode::registrationWorker()
@@ -1019,6 +1032,7 @@ namespace super_lio_slam
     {
       RegistrationTask task;
       {
+        // 等待配准任务的到来
         std::unique_lock<std::mutex> lock(registration_mutex_);
         registration_cv_.wait(lock, [this]
                               { return stopping_ || !registration_tasks_.empty(); });
@@ -1036,6 +1050,7 @@ namespace super_lio_slam
           if (stopping_ || backend_faulted_)
             break;
           {
+            // 再次检测时间
             std::lock_guard<std::mutex> lock(graph_mutex_);
             if (!loopCandidateEligible(frames_[task.index].stamp, frames_[task.index].odom_pose,
                                        candidate.historical_index))
@@ -1048,17 +1063,19 @@ namespace super_lio_slam
             RCLCPP_INFO(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m; verifying registration",
                         candidate.historical_index, task.index, candidate.proposal.first.norm());
           std::unique_ptr<RegistrationObservation> observation;
+
+          // 两种验证、获取测量的方式
           if (registration_mode_ == "std_teaser_gicp")
           {
             Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
             hint.block<3, 3>(0, 0) = candidate.proposal.second;
             hint.block<3, 1>(0, 3) = candidate.proposal.first;
-            // 确认子图，获取观测
+            // 以多帧图组成子地图进行匹配，获取观测
             observation = verifySubmaps(task.source_window, candidate.target_window,
                                         task.current_cloud, candidate.historical_index,
                                         candidate.have_pose_hint ? &hint : nullptr);
           }
-          else
+          else  // 或者其他方法
           {
             CloudPtr merged(new Cloud);
             const auto cap = std::max<std::size_t>(100,
@@ -1076,10 +1093,12 @@ namespace super_lio_slam
                                          candidate.historical_index, candidate.proposal,
                                          candidate.odom_hint ? &*candidate.odom_hint : nullptr);
           }
+
+          // 观测没有问题
           if (observation && !stopping_)
           {
             std::lock_guard<std::mutex> lock(graph_mutex_);
-            // 提交闭环，让 gtsam 进行优化
+            // 提交闭环，让 gtsam 进行 PGO 优化
             if (!backend_faulted_)
               commitLoop(task.index, candidate.historical_index, *observation);
             break;
@@ -1094,6 +1113,7 @@ namespace super_lio_slam
       {
         RCLCPP_ERROR(get_logger(), "Registration task %zu failed: %s", task.index, error.what());
       }
+      // 普通日志汇报相关信息
       RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
                            "Registration timing frame=%zu queue_wait=%.1f ms work=%.1f ms",
                            task.index, queue_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());

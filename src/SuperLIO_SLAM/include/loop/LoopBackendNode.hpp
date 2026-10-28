@@ -146,14 +146,18 @@ namespace super_lio_slam
     std::optional<builtin_interfaces::msg::Time> published_map_tf_stamp_;
     rclcpp::Clock diagnostics_clock_{RCL_STEADY_TIME};
 
+    // 订阅
     rclcpp::Subscription<super_lio_slam::msg::KeyFrame>::SharedPtr keyframe_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr frontend_odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr frontend_imu_sub_;
+
+    // 发布
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr std_marker_pub_;
+    // tf 定时器、广播器
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::CallbackGroup::SharedPtr tf_callback_group_;
     rclcpp::TimerBase::SharedPtr tf_timer_;
