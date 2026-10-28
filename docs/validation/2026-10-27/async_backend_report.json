@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-27",
+  "build": {
+    "status": "passed",
+    "log": "/tmp/superlio_async_build.log"
+  },
+  "ctest": {
+    "status": "passed",
+    "tests": 1
+  },
+  "tests": {
+    "async_burst": {
+      "status": "passed",
+      "log": "/tmp/superlio_async_burst_result.log",
+      "summary": [
+        "PASS: 24 graph nodes retained in 0.62 s; dropped detection tasks=1; delayed loop keeps latest pose; map published"
+      ],
+      "sha256": "9fec481958ad08a2c6a0f6458502e0b3d2a5cc5e4a60abcd35ae5e9b031daf94"
+    },
+    "teaser_gicp_positive": {
+      "status": "passed",
+      "log": "/tmp/superlio_async_positive.log",
+      "summary": [
+        "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.1339 m corrected"
+      ],
+      "sha256": "2151fbfcb3aa5915676b90d94d1817636353fbe47dd01dd4d9fb473430711023"
+    },
+    "registration_rejection": {
+      "status": "passed",
+      "log": "/tmp/superlio_async_reject.log",
+      "summary": [
+        "PASS: ICP rejection left the 1.000 m raw drift unchanged"
+      ],
+      "sha256": "960a063a5922dbdee8dcbc250e962a3728156a788e14b367f138781a4e451a74"
+    },
+    "legacy_moving": {
+      "status": "passed",
+      "log": "/tmp/superlio_async_legacy.log",
+      "summary": [
+        "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0097 m corrected"
+      ],
+      "sha256": "f8ee56014bd13f5598cfc70432b8a8377fff247d110efc694743d1ad4ab2c577"
+    },
+    "vlp32_launch": {
+      "status": "passed",
+      "log": "/tmp/superlio_async_launch.log",
+      "summary": [
+        "PASS vlp32: runtime parameter routing; /tmp/superlio_launch_vlp32_w02ljt87.log"
+      ],
+      "sha256": "32f4982111513e73f6a0340fd8bd5400dff4e9e5ad26e8e5d9b956535202ea3b"
+    }
+  },
+  "source_sha256": {
+    "src/SuperLIO_SLAM/src/loop/LoopBackendNode.cpp": "aa2ad4f4e2f6792b6c4a83c789ec4ff9b3a4e3e17a9d8027cbdf4b8dbfd33d62",
+    "src/SuperLIO_SLAM/include/loop/LoopBackendNode.hpp": "83df3fd349d9726765cca59d3cae37ced08a45ca5bd4b29e9e5e182610f09e98",
+    "src/SuperLIO_SLAM/test/async_backend_smoke.py": "59d0ba7f5b3328da6829bda60391a10a57406fab3e264b305ae12ef7da4cd98b",
+    "src/SuperLIO_SLAM/test/online_loop_smoke.py": "bd1d6782afae4b90e2ceef2dd8bfc24d871b820d59368307dca217dcc4e1766a"
+  },
+  "limits": [
+    "Synthetic scheduling and registration tests; no full UrbanNav replay or ground-truth evaluation in this change.",
+    "Positive synthetic cases explicitly use a two-frame window, coarse inlier ratio 0.2 and coarse RMSE limit 0.35 m; runtime defaults remain four frames, 0.3 and 0.3 m.",
+    "Drop count in logs is throttled; the burst test verifies at least one eviction, not the exact total.",
+    "Graph updates still serialize ingress briefly; descriptor generation/retrieval remain sequential.",
+    "Map rebuild requests coalesce; no historical FPFH cache or incremental map rebuild is implemented."
+  ]
+}

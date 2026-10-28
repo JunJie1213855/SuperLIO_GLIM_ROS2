@@ -1,0 +1,78 @@
+{
+  "date": "2026-10-27",
+  "parameter": {
+    "loop_min_time_separation_s": 30.0,
+    "comparison": "current sensor stamp - historical sensor stamp > threshold"
+  },
+  "build": {
+    "status": "passed",
+    "log": "/tmp/superlio_loop_time_build.log"
+  },
+  "ctest": {
+    "status": "passed",
+    "tests": 1
+  },
+  "temporal_boundary_tests": [
+    {
+      "mode": "std_teaser_gicp",
+      "case": "below",
+      "gap_ns": 29999999999,
+      "loop_accepted": false,
+      "status": "passed",
+      "log": "/tmp/superlio_time_std_teaser_gicp_below.log",
+      "summary": "PASS: time-window rejection left the 1.000 m raw drift unchanged"
+    },
+    {
+      "mode": "std_teaser_gicp",
+      "case": "equal",
+      "gap_ns": 30000000000,
+      "loop_accepted": false,
+      "status": "passed",
+      "log": "/tmp/superlio_time_std_teaser_gicp_equal.log",
+      "summary": "PASS: time-window rejection left the 1.000 m raw drift unchanged"
+    },
+    {
+      "mode": "std_teaser_gicp",
+      "case": "above",
+      "gap_ns": 30000000001,
+      "loop_accepted": true,
+      "status": "passed",
+      "log": "/tmp/superlio_time_std_teaser_gicp_above.log",
+      "summary": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0099 m corrected"
+    },
+    {
+      "mode": "std_icp",
+      "case": "below",
+      "gap_ns": 29999999999,
+      "loop_accepted": false,
+      "status": "passed",
+      "log": "/tmp/superlio_time_std_icp_below.log",
+      "summary": "PASS: time-window rejection left the 1.000 m raw drift unchanged"
+    },
+    {
+      "mode": "std_icp",
+      "case": "equal",
+      "gap_ns": 30000000000,
+      "loop_accepted": false,
+      "status": "passed",
+      "log": "/tmp/superlio_time_std_icp_equal.log",
+      "summary": "PASS: time-window rejection left the 1.000 m raw drift unchanged"
+    },
+    {
+      "mode": "std_icp",
+      "case": "above",
+      "gap_ns": 30000000001,
+      "loop_accepted": true,
+      "status": "passed",
+      "log": "/tmp/superlio_time_std_icp_above.log",
+      "summary": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0099 m corrected"
+    }
+  ],
+  "source_sha256": {
+    "src/SuperLIO_SLAM/src/loop/LoopBackendNode.cpp": "07e0a51945d4815b690c52997bd3325c3425538e2826d937e2ac5aa81f95dc5f",
+    "src/SuperLIO_SLAM/include/loop/LoopBackendNode.hpp": "5fd910070cc4ca97361956724531e174a32137d6bf211583a62a5e912649bbd5",
+    "src/SuperLIO_SLAM/std/src/STDesc.cpp": "aaf49f2ac15dcf505090c0e93bf052385e8143d0b8f4d4a49fd529a39abe9d00",
+    "src/SuperLIO_SLAM/std/include/STDesc.h": "e440679db5a2832dec12d8eef6eb4893ec50e006ce162bbda32bf286d15b66c0",
+    "src/SuperLIO_SLAM/test/online_loop_smoke.py": "5a8d9b5dc2fb35d2df61c2644466b554517deff53c2f6cf24777540288796255"
+  }
+}

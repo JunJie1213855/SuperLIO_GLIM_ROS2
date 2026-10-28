@@ -1,0 +1,82 @@
+{
+  "date": "2026-10-27",
+  "defaults": {
+    "loop_candidate_mode": "distance",
+    "loop_candidate_radius_m": 15.0,
+    "loop_min_time_separation_s": 30.0,
+    "coarse_max_inlier_rmse_m": 0.3
+  },
+  "tests": {
+    "new_positive": {
+      "status": "passed",
+      "log": "/tmp/superlio_distance_new_positive.log",
+      "summary": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0099 m corrected"
+    },
+    "time_reject": {
+      "status": "passed",
+      "log": "/tmp/superlio_distance_time_reject.log",
+      "summary": "PASS: candidate gate rejection left the 1.000 m raw drift unchanged"
+    },
+    "radius_reject": {
+      "status": "passed",
+      "log": "/tmp/superlio_distance_radius_reject.log",
+      "summary": "PASS: candidate gate rejection left the 1.000 m raw drift unchanged"
+    },
+    "legacy_positive": {
+      "status": "passed",
+      "log": "/tmp/superlio_distance_legacy_positive.log",
+      "summary": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0099 m corrected"
+    },
+    "std_regression": {
+      "status": "passed",
+      "log": "/tmp/superlio_distance_std_regression.log",
+      "summary": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0099 m corrected"
+    }
+  },
+  "build": "passed",
+  "ctest": "passed",
+  "vlp32_launch": {
+    "status": "passed",
+    "log": "/tmp/superlio_distance_launch.log"
+  },
+  "urbannav_full_bag_default": {
+    "odom_messages": 714,
+    "latest_stamp": 1584175835.731349,
+    "path_poses": 714,
+    "loop_edges": 0,
+    "wall_seconds": 113.79272294900147,
+    "folder": "/tmp/superlio_distance_urbannav_exy0hqr5",
+    "distance_attempts": 44,
+    "accepted": 0,
+    "few_coarse_inliers": 41,
+    "input_gaps": 0,
+    "pcl_time_warnings": 0
+  },
+  "urbannav_trial_offset_100s_rmse_04": {
+    "odom_messages": 516,
+    "latest_stamp": 1584175833.731235,
+    "path_poses": 513,
+    "loop_edges": 3,
+    "wall_seconds": 80.09082902699811,
+    "folder": "/tmp/superlio_distance_urbannav_vlp97l2w",
+    "coarse_max_inlier_rmse_m": 0.4,
+    "start_offset_s": 100.0,
+    "distance_attempts": 21,
+    "accepted": 3,
+    "few_coarse_inliers": 18,
+    "input_gaps": 0,
+    "pcl_time_warnings": 0
+  },
+  "limitations": [
+    "Trial restarts LIO at bag offset 100 seconds; different initialization from the full-bag baseline, not a controlled single-variable comparison.",
+    "Accepted factors pass implementation quality checks; no ground-truth loop-label or ATE/RPE audit.",
+    "Dataset has no point time field; zero offsets and unverified sensor extrinsics remain unchanged.",
+    "Default strict RMSE 0.3 full-bag replay accepts no loops; optional profile 0.4 is opt-in."
+  ],
+  "source_sha256": {
+    "src/SuperLIO_SLAM/src/loop/LoopBackendNode.cpp": "4ea715e2caac5ebb17a8ab500b9aee37b99dcbb16af5dbaf3872c4f2382f4108",
+    "src/SuperLIO_SLAM/include/loop/LoopBackendNode.hpp": "7c0392ba529ee9bbc6e633851c2a933a00f7544cd6ec1b2ce663c0d6348171b5",
+    "src/SuperLIO_SLAM/launch/slam.launch.py": "033293aafbe0ec8ed01f20a77f5da33b0c8c0668c3cf4b4e976200b561a9b90f",
+    "src/SuperLIO_SLAM/config/loop_distance_teaser_gicp.yaml": "7279182a6fad8f48d3b57525a81b6be0c962c6a28c4fd7cd280dc6b747f5603a"
+  }
+}

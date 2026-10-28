@@ -1,0 +1,78 @@
+# 设计草案；新增参数尚未实现，不能作为现有节点的有效运行配置。
+# 数字仅为首轮实验起点，未经过 bag 标定。米、弧度/度、m² 分开标注。
+loop_backend_node:
+  ros__parameters:
+    loop_registration_mode: std_teaser_gicp  # 旧模式 std_icp 保留作基线
+    skip_near_num: 10
+    loop_min_interval: 20
+    std_registration_top_k: 3  # 和 STD 粗检索 candidate_num 区别开
+
+    # 子图 FPFH 点对；STD 顶点对应仅用于诊断/可选补充。
+    correspondence_quantization_m: 0.01
+    correspondence_min_unique: 6
+    correspondence_max_unique: 200
+    correspondence_min_baseline_m: 2.0
+    # 近共线与分布判据在实现中显式定义、记录奇异值并离线标定。
+
+    teaser_estimate_scaling: false
+    teaser_noise_bound_m: 0.3
+    teaser_cbar2: 1.0
+    teaser_rotation_algorithm: GNC_TLS
+    teaser_rotation_max_iterations: 100
+    teaser_rotation_gnc_factor: 1.4
+    teaser_rotation_cost_threshold: 0.000001
+    teaser_inlier_selection: PMC_HEU
+    teaser_max_clique_time_limit_s: 0.05  # 只限制最大团阶段，不是全流程硬超时
+    teaser_max_clique_num_threads: 2
+    coarse_residual_threshold_m: 0.6  # 单独定义，不直接当作 noise_bound
+    coarse_min_inliers: 6
+    coarse_min_inlier_ratio: 0.3
+    coarse_plane_score_gate_enabled: false  # 单帧平面稀疏，先记录指标
+    coarse_min_plane_score: 0.4  # 在 TEASER 变换下评估，启用门限前标定
+
+    std_input_mode: single_keyframe
+    coarse_correspondence_source: submap_fpfh
+    fpfh_normal_radius_m: 1.0  # 待密度与体素尺度标定
+    fpfh_feature_radius_m: 2.5
+    fpfh_reciprocal_matching: true
+    fpfh_distance_ratio_threshold: 0.9
+    registration_submap_storage: deque  # 当前滑窗；历史关键帧另行保存
+    registration_submap_max_keyframes: 4  # 包含中心关键帧，2/4/6 帧消融对照
+    registration_submap_max_duration_s: 6.0
+    registration_submap_max_travel_distance_m: 6.0
+    source_submap_left_frames: 3
+    target_submap_left_frames: 3
+    target_submap_right_frames: 0  # 历史注册子图因果窗口；STD 本身维持单帧
+    submap_exclude_shared_frames: true
+    registration_voxel_size_m: 0.5
+    registration_min_points: 100
+    registration_max_source_points: 10000
+    registration_max_target_points: 50000
+    gicp_max_iterations: 40
+    gicp_correspondence_randomness: 20
+    gicp_max_correspondence_distance_m: 2.0
+    gicp_transformation_epsilon: 0.000001
+    gicp_euclidean_fitness_epsilon: 0.000001
+
+    # 独立统计的 NN 质量门限，不能直接复用到 PCL 的 max_range 参数。
+    quality_nn_radius_m: 1.0
+    quality_min_source_overlap: 0.35
+    quality_min_current_frame_overlap: 0.35
+    quality_min_inlier_count: 100
+    quality_max_inlier_mse_m2: 0.25
+    quality_max_refinement_translation_m: 5.0
+    quality_max_refinement_rotation_deg: 20.0
+    # 退化门限待实验标定；代码缺少退化检查时不视为完整准入实现。
+
+    # 图噪声先沿用当前 YAML：旋转 rad，平移 m。
+    graph_odom_translation_sigma: 0.1
+    graph_odom_rotation_sigma: 0.05
+    graph_loop_translation_sigma: 0.2
+    graph_loop_rotation_sigma: 0.1
+    graph_loop_huber_k: 1.345
+
+    map_rebuild_async: false  # M4 完成版本检查和退出验证后再开启
+    loop_registration_async: false  # P3 按实测需求启用
+    registration_soft_budget_ms: 500.0  # 超过后不再启动下一候选，不保证硬截止
+    registration_queue_capacity: 2  # 仅异步注册任务；不丢关键帧/里程计边
+    loop_diagnostic_stride: 1

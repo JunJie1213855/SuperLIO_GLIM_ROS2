@@ -1,0 +1,79 @@
+{
+  "directory": "/tmp/superlio_registration_replay_2n_3_zuq",
+  "messages": {
+    "/lio_slam/keyframe": 50,
+    "/lio_slam/path": 50
+  },
+  "final_path_poses": 50,
+  "search_frames": 50,
+  "accepted_loops": [
+    "[loop_backend_node-2] [INFO] [1793108639.105793644] [loop_backend_node]: Loop 0 -> 11 accepted: TEASER/GICP mse 0.0807 overlap 0.909",
+    "[loop_backend_node-2] [INFO] [1793108671.790959289] [loop_backend_node]: Loop 1 -> 31 accepted: TEASER/GICP mse 0.1270 overlap 0.827"
+  ],
+  "registration_attempts": [
+    "[loop_backend_node-2] [INFO] [1793108639.105712004] [loop_backend_node]: Submap 0 -> 11 stage=accepted frames=4/1 points=1765/1340 pairs=160 coarse_inliers=94 inliers=1604 mse=0.0807 overlap=0.909 current_overlap=0.884 coarse_ms=135.8 fine_ms=29.5 info_ratio=0.123485 hint=0",
+    "[loop_backend_node-2] [INFO] [1793108671.462187511] [loop_backend_node]: Submap 14 -> 31 stage=few_coarse_inliers frames=4/4 points=1796/1794 pairs=58 coarse_inliers=10 inliers=0 mse=0.0000 overlap=0.000 current_overlap=0.000 coarse_ms=316.8 fine_ms=0.0 info_ratio=0.000000 hint=0",
+    "[loop_backend_node-2] [INFO] [1793108671.607631879] [loop_backend_node]: Submap 4 -> 31 stage=few_coarse_inliers frames=4/2 points=1796/1516 pairs=68 coarse_inliers=15 inliers=0 mse=0.0000 overlap=0.000 current_overlap=0.000 coarse_ms=143.3 fine_ms=0.0 info_ratio=0.000000 hint=0",
+    "[loop_backend_node-2] [INFO] [1793108671.790900990] [loop_backend_node]: Submap 1 -> 31 stage=accepted frames=4/2 points=1796/1404 pairs=24 coarse_inliers=11 inliers=1486 mse=0.1270 overlap=0.827 current_overlap=0.833 coarse_ms=144.5 fine_ms=35.9 info_ratio=0.125162 hint=1"
+  ],
+  "dataset": "/home/ros/dataset/robosense/mapping",
+  "dataset_metadata_sha256": "fcb556c6186853681d77ccd5de7d81a1583319607811ff5b5e2f6fc8ca632e31",
+  "teaser_commit": "52a9c52ee7d4c838c5e8a75458c33178be5bfb70",
+  "ground_truth": "not available; accepted constraints are not verified loop precision/recall",
+  "export": {
+    "bag": "/tmp/superlio_registration_replay_2n_3_zuq/bag",
+    "keyframes": 50,
+    "path_messages": 50,
+    "exported": 50,
+    "excluded_keyframes_not_in_final_path": 0,
+    "frame": "map",
+    "pose_frame": "imu",
+    "points": 302903
+  },
+  "smoke_tests": {
+    "new_static_4_frames": {
+      "log": "/tmp/superlio_smoke_teaser_final.log",
+      "result": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.3686 m corrected",
+      "passed": true
+    },
+    "new_rotated_2_frames_ratio_0.2": {
+      "log": "/tmp/superlio_smoke_teaser_moving_final.log",
+      "result": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.1371 m corrected",
+      "passed": true
+    },
+    "new_rejection": {
+      "log": "/tmp/superlio_smoke_teaser_reject_final.log",
+      "result": "PASS: ICP rejection left the 1.000 m raw drift unchanged",
+      "passed": true
+    },
+    "legacy_rotated": {
+      "log": "/tmp/superlio_smoke_legacy_moving_final.log",
+      "result": "PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> 0.0097 m corrected",
+      "passed": true
+    },
+    "known_limit_new_rotated_4_frames_ratio_0.3": {
+      "log": "/tmp/superlio_smoke_teaser_moving.log",
+      "result": "FAILED: no accepted loop",
+      "passed": false
+    }
+  },
+  "source_sha256": {
+    "src/SuperLIO_SLAM/src/loop/GicpRegistration.cpp": "edce257fc6f6638f033dd7f30b717f5e6efd912c2ab483ee3f995fcbd7ce583a",
+    "src/SuperLIO_SLAM/src/loop/TeaserCoarseRegistration.cpp": "6345d6d3fbb98aba9f08dfde91767b3f88adce988fff39e366d7911904ea0e0f",
+    "src/SuperLIO_SLAM/src/loop/SubmapWindow.cpp": "4e016fbd33c29cb4c2a372d7dffe7294d92183abb23327bf3856da24b73ca1b6",
+    "src/SuperLIO_SLAM/src/loop/LoopBackendNode.cpp": "ff0c15bb3f34daeca5866405db2328a53a7d0245e9710341d7cfe7b5c44fc2a0",
+    "src/SuperLIO_SLAM/include/loop/SubmapRegistration.hpp": "ace20a72fa6cd5d2300c48f3ab3a3acc450b6c61610e0b7dc81c301c7cf159b7",
+    "src/SuperLIO_SLAM/config/loop_teaser_gicp.yaml": "982541137f661dbf9e606748bda2b69be7eb6d0fdec5a3c4d08b5a671fe61a57"
+  },
+  "glim_conversion": {
+    "dump": "/tmp/superlio_registration_replay_2n_3_zuq/glim_dump",
+    "submaps": 5,
+    "points": 10986,
+    "files": {
+      "graph.bin": 1504,
+      "values.bin": 688,
+      "graph.txt": 63
+    },
+    "viewer_merge_tested": false
+  }
+}
