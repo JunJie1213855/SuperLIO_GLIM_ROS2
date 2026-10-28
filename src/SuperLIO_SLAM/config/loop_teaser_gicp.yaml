@@ -25,17 +25,17 @@ loop_backend_node:
     teaser_max_clique_time_limit_s: 0.05
     teaser_max_clique_num_threads: 2
     coarse_residual_threshold_m: 0.6
-    coarse_min_inliers: 6
-    coarse_min_inlier_ratio: 0.3
-    coarse_max_inlier_rmse_m: 0.3  # RMSE over coarse inliers, not ground-truth pose error
+    coarse_min_inliers: 10
+    coarse_min_inlier_ratio: 0.05
+    coarse_max_inlier_rmse_m: 0.4  # RMSE over coarse inliers, not ground-truth pose error
     gicp_max_iterations: 40
     gicp_correspondence_randomness: 20
     gicp_max_correspondence_distance_m: 2.0
     quality_nn_radius_m: 1.0
-    quality_min_source_overlap: 0.8  # strict: source coverage > 80%
-    quality_min_current_frame_overlap: 0.8  # strict: current-frame coverage > 80%
+    quality_min_source_overlap: 0.80  # strict: source coverage > 90%
+    quality_min_current_frame_overlap: 0.80  # strict: current-frame coverage > 90%
     quality_min_inlier_count: 100
-    quality_max_inlier_mse_m2: 0.1  # strict: inlier MSE < 0.1 m^2
+    quality_max_inlier_mse_m2: 0.1  # strict: inlier RMSE < 0.1 m, equivalently MSE < 0.01 m^2
     quality_min_information_ratio: 0.00001
     quality_max_refinement_translation_m: 5.0
     quality_max_refinement_rotation_deg: 20.0

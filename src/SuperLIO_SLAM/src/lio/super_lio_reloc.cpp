@@ -12,6 +12,13 @@ using namespace BASIC;
 namespace LI2Sup {
 using namespace super_lio_slam;
 
+namespace {
+// Highlight decision fields only; leave numeric diagnostics in the terminal's normal color.
+std::string decisionText(bool accepted, const std::string& text) {
+  return std::string(accepted ? "\033[32m" : "\033[31m") + text + "\033[0m";
+}
+}  // namespace
+
 SuperLIOReLoc::~SuperLIOReLoc() {
   stopping_=true;
   registration_cv_.notify_all();
@@ -242,10 +249,11 @@ void SuperLIOReLoc::registrationWorker() {
     }
     const auto& r=result.registration;
     RCLCPP_INFO(data_wrapper_->get_logger(),
-      "Relocation registration: generation=%lu stamp=%.6f stage=%s coarse=%zu/%zu rmse=%.4f "
-      "mse=%.4f overlap=%.3f current_overlap=%.3f",
-      static_cast<unsigned long>(result.generation),result.stamp,r.reason.c_str(),r.coarse_inliers,r.pairs,
-      r.coarse_rmse,r.mse,r.overlap,r.current_overlap);
+      "Relocation registration %s: generation=%lu stamp=%.6f coarse=%zu/%zu rmse=%.4f "
+      "mse=%.4f overlap=%.3f current_overlap=%.3f stage=%s",
+      decisionText(r.accepted,r.accepted?"accepted":"rejected").c_str(),
+      static_cast<unsigned long>(result.generation),result.stamp,r.coarse_inliers,r.pairs,
+      r.coarse_rmse,r.mse,r.overlap,r.current_overlap,decisionText(r.accepted,r.reason).c_str());
     std::lock_guard<std::mutex> lock(registration_mutex_);
     if (!stopping_) pending_result_=std::move(result);
   }
@@ -273,7 +281,13 @@ bool SuperLIOReLoc::commitRegistration() {
   const double overlap=aligned->empty()?0:static_cast<double>(inliers)/aligned->size();
   const double mse=inliers?sum/inliers:std::numeric_limits<double>::infinity();
   if (inliers<static_cast<std::size_t>(settings_.min_inliers) || overlap<=settings_.min_current_overlap || mse>=settings_.max_mse) {
-    RCLCPP_WARN(data_wrapper_->get_logger(),"Delayed relocation rejected at latest scan: mse=%.4f overlap=%.3f",mse,overlap);
+    const char* reason=inliers<static_cast<std::size_t>(settings_.min_inliers) ? "few_current_inliers"
+                      : overlap<=settings_.min_current_overlap ? "low_current_overlap" : "high_inlier_mse";
+    RCLCPP_WARN(data_wrapper_->get_logger(),
+      "Delayed relocation %s at latest scan: inliers=%zu (min %d) mse=%.4f (max %.4f) "
+      "overlap=%.3f (min %.3f) stage=%s",
+      decisionText(false,"rejected").c_str(),inliers,settings_.min_inliers,mse,settings_.max_mse,
+      overlap,settings_.min_current_overlap,decisionText(false,reason).c_str());
     return false;
   }
   const SE3 world_from_local(transform.cast<scalar>());
@@ -294,8 +308,9 @@ bool SuperLIOReLoc::commitRegistration() {
   }
   setStatus("WORLD_MAP_TRACKING");
   RCLCPP_INFO(data_wrapper_->get_logger(),
-    "Relocation committed: snapshot=%.6f latest=%.6f preserved_time=%.6f mse=%.4f overlap=%.3f",
-    result->stamp,measures_.lidar.end_time,latest_time,mse,overlap);
+    "Relocation committed: snapshot=%.6f latest=%.6f preserved_time=%.6f mse=%.4f overlap=%.3f %s stage=%s",
+    result->stamp,measures_.lidar.end_time,latest_time,mse,overlap,
+    decisionText(true,"accepted").c_str(),decisionText(true,"latest_scan_quality_passed").c_str());
   return true;
 }
 

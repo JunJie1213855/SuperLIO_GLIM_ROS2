@@ -1,0 +1,44 @@
+# Indoor STD / TEASER++ / GICP trial profile, 2026-10-28.
+# Evidence: docs/validation/2026-10-28/loop_calibration/.
+# Dataset-specific log calibration; accepted loops are not ground-truth labels.
+# quality_max_inlier_mse_m2 is MSE in m^2, not RMSE in m.
+# Other geometry, refinement and minimum-inlier gates remain enabled.
+# Indoor positive-loop sample is small; further validation is required.
+loop_backend_node:
+  ros__parameters:
+    coarse_max_inlier_rmse_m: 0.4
+    coarse_min_inlier_ratio: 0.1
+    coarse_min_inliers: 3
+    coarse_residual_threshold_m: 0.6
+    correspondence_max_unique: 200
+    correspondence_min_baseline_m: 2.0
+    correspondence_min_unique: 6
+    fpfh_distance_ratio_threshold: 0.9
+    fpfh_feature_radius_m: 2.5
+    fpfh_normal_radius_m: 1.0
+    fpfh_pose_hint_radius_m: 3.0
+    gicp_correspondence_randomness: 20
+    gicp_max_correspondence_distance_m: 2.0
+    gicp_max_iterations: 40
+    quality_max_inlier_mse_m2: 0.05
+    quality_max_refinement_rotation_deg: 20.0
+    quality_max_refinement_translation_m: 5.0
+    quality_min_current_frame_overlap: 0.90
+    quality_min_information_ratio: 1.0e-05
+    quality_min_inlier_count: 100
+    quality_min_source_overlap: 0.90
+    quality_nn_radius_m: 1.0
+    registration_max_source_points: 10000
+    registration_max_target_points: 50000
+    registration_min_points: 100
+    registration_soft_budget_ms: 500.0
+    registration_submap_max_duration_s: 6.0
+    registration_submap_max_keyframes: 4
+    registration_submap_max_travel_distance_m: 6.0
+    registration_voxel_size_m: 0.3
+    std_registration_top_k: 3
+    teaser_estimate_scaling: false
+    teaser_max_clique_num_threads: 2
+    teaser_max_clique_time_limit_s: 0.05
+    teaser_noise_bound_m: 0.3
+    teaser_rotation_max_iterations: 100

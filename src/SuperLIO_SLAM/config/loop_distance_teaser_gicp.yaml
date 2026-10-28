@@ -30,7 +30,7 @@ loop_backend_node:
     teaser_max_clique_num_threads: 2
     coarse_residual_threshold_m: 0.6
     coarse_min_inliers: 30
-    coarse_min_inlier_ratio: 0.3
+    coarse_min_inlier_ratio: 0.10
     coarse_max_inlier_rmse_m: 0.4  # RMSE over coarse inliers, not ground-truth pose error
     gicp_max_iterations: 40
     gicp_correspondence_randomness: 20

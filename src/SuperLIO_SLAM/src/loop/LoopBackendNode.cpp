@@ -26,6 +26,12 @@ namespace super_lio_slam
   namespace
   {
 
+    // Reset immediately after each highlighted field to keep numeric diagnostics plain.
+    std::string decisionText(bool accepted, const std::string &text)
+    {
+      return std::string(accepted ? "\033[32m" : "\033[31m") + text + "\033[0m";
+    }
+
     gtsam::Vector6 poseSigmas(double rotation, double translation)
     {
       gtsam::Vector6 sigma;
@@ -341,7 +347,7 @@ namespace super_lio_slam
       initial.transform = *odom_hint;
       const auto alternative = refineRegister(source, target, source, settings, initial);
       RCLCPP_DEBUG(get_logger(), "GICP odometry attempt %zu -> %zu: stage=%s mse=%.4f overlap=%.3f",
-                   historical_index, current_index, alternative.reason.c_str(), alternative.mse, alternative.overlap);
+                   historical_index, current_index, decisionText(alternative.accepted, alternative.reason).c_str(), alternative.mse, alternative.overlap);
       const auto cost = [&settings](const RegistrationResult &candidate)
       {
         // Penalize unmatched source points instead of rewarding a tiny good subset.
@@ -355,11 +361,13 @@ namespace super_lio_slam
       }
     }
     RCLCPP_INFO(get_logger(),
-                "GICP %zu -> %zu %s: stage=%s initial=%s mse=%.4f m2 overlap=%.3f "
-                "current_overlap=%.3f inliers=%zu info_ratio=%.6f",
-                historical_index, current_index, result.accepted ? "passed" : "rejected",
-                result.reason.c_str(), selected_hint, result.mse, result.overlap,
-                result.current_overlap, result.inliers, result.information_ratio);
+                "GICP %zu -> %zu %s: initial=%s mse=%.4f m2 overlap=%.3f "
+                "current_overlap=%.3f inliers=%zu info_ratio=%.6f stage=%s",
+                historical_index, current_index,
+                decisionText(result.accepted, result.accepted ? "accepted" : "rejected").c_str(),
+                selected_hint, result.mse, result.overlap,
+                result.current_overlap, result.inliers, result.information_ratio,
+                decisionText(result.accepted, result.reason).c_str());
     if (!result.accepted)
       return nullptr;
     auto observation = std::make_unique<RegistrationObservation>();
@@ -375,7 +383,9 @@ namespace super_lio_slam
   {
     if (source_window.sharesFrames(target_window))
     {
-      RCLCPP_DEBUG(get_logger(), "Submap %zu rejected: shared window members", historical_index);
+      RCLCPP_DEBUG(get_logger(), "Submap %zu %s: stage=%s", historical_index,
+                   decisionText(false, "rejected").c_str(),
+                   decisionText(false, "shared_window_members").c_str());
       return nullptr;
     }
     const auto &settings = registration_settings_;
@@ -389,8 +399,9 @@ namespace super_lio_slam
     // Retry without the hint if either registration stage rejects the hinted pairs.
     if (!result.accepted && hint)
     {
-      RCLCPP_DEBUG(get_logger(), "Submap %zu hinted registration rejected (%s); retry unguided",
-                   historical_index, result.reason.c_str());
+      RCLCPP_DEBUG(get_logger(), "Submap %zu hinted registration %s; retry unguided stage=%s",
+                   historical_index, decisionText(false, "rejected").c_str(),
+                   decisionText(false, result.reason).c_str());
       const double previous_ms = result.coarse_ms + result.fine_ms;
       result = coarseRegister(source, target, settings);
       if (result.accepted)
@@ -398,15 +409,16 @@ namespace super_lio_slam
       result.coarse_ms += previous_ms;
     }
     RCLCPP_INFO(get_logger(),
-                "Registration %zu -> %zu %s: stage=%s coarse_inliers=%zu/%zu ratio=%.3f (min %.3f) "
-                "coarse_rmse=%s m (max %.3f) gicp=%s",
+                "Registration %zu -> %zu %s: coarse_inliers=%zu/%zu ratio=%.3f (min %.3f) "
+                "coarse_rmse=%s m (max %.3f) gicp=%s stage=%s",
                 historical_index, source_window.entries().back().index,
-                result.accepted ? "passed" : "rejected", result.reason.c_str(),
+                decisionText(result.accepted, result.accepted ? "accepted" : "rejected").c_str(),
                 result.coarse_inliers, result.pairs,
                 result.pairs ? static_cast<double>(result.coarse_inliers) / result.pairs : 0.0,
                 settings.coarse_min_ratio,
                 result.coarse_inliers ? std::to_string(result.coarse_rmse).c_str() : "n/a",
-                settings.coarse_max_rmse, result.fine_ms > 0.0 ? "executed" : "skipped");
+                settings.coarse_max_rmse, result.fine_ms > 0.0 ? "executed" : "skipped",
+                decisionText(result.accepted, result.reason).c_str());
     if (result.fine_ms > 0.0)
     {
       RCLCPP_INFO(get_logger(),
@@ -641,9 +653,9 @@ namespace super_lio_slam
               if (pending_window.sharesFrames(match.target_window))
                 continue;
               RCLCPP_INFO(get_logger(),
-                          "STD %d -> %zu matched: time_gap=%.3f s (> %.3f) distance=%.2f m (<= %.2f) hint=%s",
+                          "STD %d -> %zu matched: time_gap=%.3f s (> %.3f) distance=%.2f m (<= %.2f) hint=%s std_pairs=%zu",
                           h, index, time_gap, loop_min_time_separation_s_, candidate_distance,
-                          candidate_radius_m_, match.have_pose_hint ? "STD" : "none");
+                          candidate_radius_m_, match.have_pose_hint ? "STD" : "none", candidate.match_list_.size());
               task.candidates.push_back(std::move(match));
             }
           }
@@ -1113,8 +1125,9 @@ namespace super_lio_slam
       have_map_transform_ = true;
     }
     publishCurrent(latest, true);
-    RCLCPP_INFO(get_logger(), "Loop %zu -> %zu accepted: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
-                historical, index, registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "GICP",
+    RCLCPP_INFO(get_logger(), "Loop %zu -> %zu %s: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
+                historical, index, decisionText(true, "accepted").c_str(),
+                registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "GICP",
                 observation.fitness, observation.overlap, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count(), latest);
   }
 

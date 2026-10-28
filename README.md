@@ -20,6 +20,10 @@
       └── fix_dump_boost19.py
 ```
 
+## 室内 / 室外回环配置
+
+`vlp32.launch.py` 默认使用 `loop_outdoor_teaser_gicp.yaml`，`unitree_slam.launch.py` 默认使用 `loop_indoor_teaser_gicp.yaml`。两套参数、完整回放中位数、逐候选数据和验证范围见[室内/室外回环统计报告](docs/loop_parameter_calibration.md)。
+
 ## 数据集
 
 Unitree 数据集下载地址：

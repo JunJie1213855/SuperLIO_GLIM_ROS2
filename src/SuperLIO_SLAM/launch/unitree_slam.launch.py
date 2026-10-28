@@ -14,12 +14,15 @@ def generate_launch_description():
             [share, 'config', 'unitree_l1.yaml'])),
         DeclareLaunchArgument('slam_config', default_value=PathJoinSubstitution(
             [share, 'config', 'unitree_slam.yaml'])),
+        DeclareLaunchArgument('registration_config', default_value=PathJoinSubstitution(
+            [share, 'config', 'loop_indoor_teaser_gicp.yaml'])),
         DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([share, 'launch', 'slam.launch.py'])),
             launch_arguments={
                 'sensor_config': LaunchConfiguration('sensor_config'),
                 'slam_config': LaunchConfiguration('slam_config'),
+                'registration_config': LaunchConfiguration('registration_config'),
                 'rviz': LaunchConfiguration('rviz'),
             }.items(),
         ),

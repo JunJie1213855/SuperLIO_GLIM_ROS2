@@ -99,6 +99,12 @@ physical sensor.
 
 All mapping launch profiles now include the shared `slam.launch.py` pipeline with the loop backend enabled. Use `enable_loop_backend:=false` to run only SuperLIO (keyframe publication is disabled and the default RViz view switches to `lio.rviz`). `relocation.launch.py` and `std_extract.launch.py` remain standalone tools.
 
+## Indoor and outdoor registration profiles
+
+`vlp32.launch.py` now defaults to `config/loop_outdoor_teaser_gicp.yaml`; `unitree_slam.launch.py` defaults to `config/loop_indoor_teaser_gicp.yaml`. Both accept an explicit `registration_config` override. The generic launch default remains `loop_teaser_gicp.yaml`.
+
+The profiles are based on separate UrbanNav outdoor and Unitree indoor replay statistics. GICP error limits are MSE in m²: outdoor 0.10 and indoor 0.08, not RMSE 0.1 m. The indoor positive sample is small, and neither profile has ground-truth loop validation. See the [calibration report](../../docs/loop_parameter_calibration.md) for medians, sample counts, thresholds, commands and validation limits.
+
 ## Data contract
 
 `/lio_slam/keyframe` uses `super_lio_slam/msg/KeyFrame`. `odom_pose` is the uncorrected end-of-scan IMU pose in `world`; `cloud` is deskewed and expressed in that end-of-scan IMU frame. The keyframe ID and timestamp identify the corresponding pose and cloud. The backend publishes:
