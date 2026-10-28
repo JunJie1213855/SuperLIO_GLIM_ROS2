@@ -23,80 +23,82 @@
 #include "OctVoxMap/VoxelGridFilter.h"
 #include "ros/ROSWrapper.h"
 
-namespace LI2Sup{
+namespace LI2Sup
+{
 
-class SuperLIO{
-public:
-  SuperLIO(){};
-  ~SuperLIO(){};
+  class SuperLIO
+  {
+  public:
+    SuperLIO() {};
+    virtual ~SuperLIO() = default;
 
-  void setROSWrapper(const ROSWrapper::Ptr& wrapper){
-    data_wrapper_ = wrapper;
-  }
-  virtual void init();
-  void process();
-  void saveMap();
-  void printTimeRecord();
+    void setROSWrapper(const ROSWrapper::Ptr &wrapper)
+    {
+      data_wrapper_ = wrapper;
+    }
+    virtual void init();
+    virtual void process();
+    void saveMap();
+    void printTimeRecord();
 
-protected:
-  void stateWaitKFInit();
-  void stateWaitMapInit();
-  void stateProcess();
-  virtual bool kf_init();
-  virtual bool map_init();
-  void Propagation_Undistort();
-  void DownSample();
-  void Observe();
-  virtual void UpdateMap();
-  virtual void Output();
-  void PublishKeyframe();
-  void caceData();
-  void ProcessCaceMap();
+  protected:
+    void stateWaitKFInit();
+    void stateWaitMapInit();
+    void stateProcess();
+    virtual bool kf_init();
+    virtual bool map_init();
+    void Propagation_Undistort();
+    void DownSample();
+    void Observe();
+    virtual void UpdateMap();
+    virtual void Output();
+    void PublishKeyframe();
+    void caceData();
+    void ProcessCaceMap();
 
-  using StateFn = void (SuperLIO::*)();
-  using OctVoxMapType = OctVoxMap<BASIC::V3, BASIC::scalar>;
-  using KNNHeapType = KNNHeap<5, BASIC::V3>;
-  StateFn state_fn_;
-  ESKF::Ptr kf_;
-  OctVoxMapType::Ptr ivox_;
-  VoxelGridClosest<BASIC::PointType> voxel_grid_fliter_;
-  ROSWrapper::Ptr data_wrapper_;
-  MeasureGroup measures_;
-  
-  bool flg_init_ = false;
-  bool flg_first_scan_ = true;
-  std::vector<DynamicState> propagate_states_;
-  BASIC::CloudPtr scan_undistort_full_;
-  BASIC::CloudPtr ds_undistort_;
-  BASIC::CloudPtr point_map_, world_pc_, ds_world_;
-  int frame_num_ = 0;
-  BASIC::SE3 sys_init_pose_;
-  BASIC::SE3 last_pose_;
+    using StateFn = void (SuperLIO::*)();
+    using OctVoxMapType = OctVoxMap<BASIC::V3, BASIC::scalar>;
+    using KNNHeapType = KNNHeap<5, BASIC::V3>;
+    StateFn state_fn_;
+    ESKF::Ptr kf_;
+    OctVoxMapType::Ptr ivox_;
+    VoxelGridClosest<BASIC::PointType> voxel_grid_fliter_;
+    ROSWrapper::Ptr data_wrapper_;
+    MeasureGroup measures_;
 
-  std::size_t effect_knn_num_ = 0;
-  BASIC::VV3 points_world_v3_, points_body_v3_;
-  alignas(64) bool effect_mask_[20000] = {false};
-  alignas(64) bool effect_knn_mask_[20000] = {false};
-  std::vector<int> effect_knn_idxs_;
-  std::vector<std::pair<BASIC::M6, BASIC::V6>> H_R_;
-  std::vector<std::array<double, 4>> abcd_vec_;
-  int pcd_index_ = -1;
+    bool flg_init_ = false;
+    bool flg_first_scan_ = true;
+    std::vector<DynamicState> propagate_states_;
+    BASIC::CloudPtr scan_undistort_full_;
+    BASIC::CloudPtr ds_undistort_;
+    BASIC::CloudPtr point_map_, world_pc_, ds_world_;
+    int frame_num_ = 0;
+    BASIC::SE3 sys_init_pose_;
+    BASIC::SE3 last_pose_;
 
-  bool keyframe_enabled_ = true;
-  bool have_keyframe_ = false;
-  double keyframe_distance_ = 1.5;
-  double keyframe_angle_rad_ = 10.0 * 3.14159265358979323846 / 180.0;
-  double keyframe_max_interval_ = 3.0;
-  double keyframe_voxel_leaf_ = 0.5;
-  int keyframe_min_points_ = 100;
-  uint32_t next_keyframe_id_ = 0;
-  double last_keyframe_time_ = 0.0;
-  BASIC::SE3 last_keyframe_pose_;
+    std::size_t effect_knn_num_ = 0;
+    BASIC::VV3 points_world_v3_, points_body_v3_;
+    alignas(64) bool effect_mask_[20000] = {false};
+    alignas(64) bool effect_knn_mask_[20000] = {false};
+    std::vector<int> effect_knn_idxs_;
+    std::vector<std::pair<BASIC::M6, BASIC::V6>> H_R_;
+    std::vector<std::array<double, 4>> abcd_vec_;
+    int pcd_index_ = -1;
 
-  Timer time_record_;
-};
+    bool keyframe_enabled_ = true;
+    bool have_keyframe_ = false;
+    double keyframe_distance_ = 1.5;
+    double keyframe_angle_rad_ = 10.0 * 3.14159265358979323846 / 180.0;
+    double keyframe_max_interval_ = 3.0;
+    double keyframe_voxel_leaf_ = 0.5;
+    int keyframe_min_points_ = 100;
+    uint32_t next_keyframe_id_ = 0;
+    double last_keyframe_time_ = 0.0;
+    BASIC::SE3 last_keyframe_pose_;
+
+    Timer time_record_;
+  };
 
 } // namespace END.
 
 #endif
-

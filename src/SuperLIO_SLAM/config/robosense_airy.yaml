@@ -47,8 +47,9 @@
     lio.output.ml_map: false
     lio.output.planner: false
     lio.output.map: true
-    # Publish the full deskewed current scan on /lio/cloud_world.
-    lio.output.dense: true
+    # Publish the voxel-filtered deskewed scan on /lio/cloud_world.
+    # Leaf size follows lio.sensor.voxel_fliter_size (0.5 m).
+    lio.output.dense: false
     lio.output.pub_step: 1
 
     lio.eva.timer: false

@@ -77,6 +77,9 @@ public:
   void SetLastObsTime(const double obs_time) { last_obs_time_ = obs_time; }
 
   void SetX(const SysState& x);
+  void InitializePrediction(const SysState& state, const IMUData& last_imu);
+  void ChangeReferenceFrame(const BASIC::SE3& transform,
+                            double position_variance = 0.0, double rotation_variance = 0.0);
 
   void SetCov(const COV& cov){ P_ = cov; }
 

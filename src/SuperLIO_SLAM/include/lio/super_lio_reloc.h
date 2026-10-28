@@ -1,44 +1,68 @@
-
-
-#ifndef SUPER_LIO_RELOCATION_H_
-#define SUPER_LIO_RELOCATION_H_
-
+#pragma once
 
 #include "super_lio.h"
+#include "lio/RelocationRegistration.h"
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <std_msgs/msg/string.hpp>
+#include <pcl/kdtree/kdtree_flann.h>
 
+namespace LI2Sup
+{
+  class SuperLIOReLoc final : public SuperLIO
+  {
+  public:
+    SuperLIOReLoc() = default;
+    ~SuperLIOReLoc() override;
+    void init() override;
+    void process() override;
 
-namespace LI2Sup{
+  private:
+    enum class Stage
+    {
+      Bootstrap,
+      Local,
+      World,
+      Failed
+    };
+    bool initializeLocal();
+    void rememberFrame();
+    void enqueueRegistration();
+    void registrationWorker();
+    bool commitRegistration();
+    void receivePrior(const geometry_msgs::msg::PoseWithCovarianceStamped &msg);
+    void setStatus(const std::string &status);
+    void limitScan();
+    void Output() override;
 
-class SuperLIOReLoc : public SuperLIO {
-public:
-  SuperLIOReLoc(){
-    BASIC::V3 init_t = BASIC::V3(g_init_px, g_init_py, g_init_pz);
-    Eigen::Matrix3d init_R = (Eigen::AngleAxisd(g_init_yaw / 180 * M_PI, Eigen::Vector3d::UnitZ()) *
-                              Eigen::AngleAxisd(g_init_pitch /180 * M_PI, Eigen::Vector3d::UnitY()) *
-                              Eigen::AngleAxisd(g_init_roll / 180 * M_PI, Eigen::Vector3d::UnitX())).toRotationMatrix();
-                
-    BASIC::M3 init_R2 = init_R.cast<BASIC::scalar>();             
-      
-    re_init_pose_ = BASIC::SE3(BASIC::SO3(init_R2), init_t);
+    Stage stage_ = Stage::Bootstrap;
+    std::string status_;
+    OctVoxMapType::Ptr local_ivox_, reference_ivox_;
+    BASIC::CloudPtr reference_cloud_;
+    pcl::KdTreeFLANN<BASIC::PointType> reference_tree_;
+    super_lio_slam::SubmapWindow window_;
+    super_lio_slam::RegistrationSettings settings_;
+    std::deque<IMUData> initialization_imu_;
+    std::size_t imu_samples_ = 50;
+    int min_frames_ = 5, min_plane_points_ = 30;
+    double init_duration_ = .3, max_gyro_ = .15, max_gyro_std_ = .02, max_accel_std_ = .15;
+    double keyframe_distance_ = .2, keyframe_angle_ = 5.0, keyframe_interval_ = .3;
+    double registration_interval_ = 1.0, crop_radius_ = 80.0, gravity_angle_ = 10.0;
+    double position_variance_ = .04, rotation_variance_ = .0012184697;
+    double last_scan_time_ = -1, last_task_time_ = -1;
+    bool tracking_good_ = false, have_prior_ = true;
+    BASIC::SE3 prior_pose_, prior_local_pose_;
+    std::uint64_t generation_ = 1;
+    std::size_t next_frame_ = 0;
+    std::mutex registration_mutex_;
+    std::condition_variable registration_cv_;
+    std::optional<super_lio_slam::RelocationSnapshot> pending_task_;
+    std::optional<super_lio_slam::RelocationResult> pending_result_;
+    std::atomic<bool> stopping_{false};
+    std::thread registration_thread_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   };
-  ~SuperLIOReLoc(){};
-
-  void init() override;
-
-private:
-  bool kf_init() override;
-  bool map_init() override;
-  void UpdateMap() override;
-  void Output() override;
-
-private:
-  BASIC::CloudPtr init_obs_data_;
-  bool flg_get_init_guess_ = false;
-  BASIC::SE3 re_init_pose_;
-};
-
-} // namespace END.
-
-#endif
-
-
+} // namespace LI2Sup

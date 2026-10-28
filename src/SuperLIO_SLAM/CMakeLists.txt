@@ -52,7 +52,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/runtime_library_dirs.txt"
 add_library(submap_registration STATIC
   src/loop/SubmapWindow.cpp
   src/loop/TeaserCoarseRegistration.cpp
-  src/loop/GicpRegistration.cpp)
+  src/loop/GicpRegistration.cpp
+  src/lio/RelocationRegistration.cpp)
+set_target_properties(submap_registration PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(submap_registration PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include ${PCL_INCLUDE_DIRS})
 target_link_libraries(submap_registration PUBLIC Eigen3::Eigen ${PCL_LIBRARIES})
@@ -109,7 +111,7 @@ ament_target_dependencies(lio PUBLIC
   rclcpp std_msgs geometry_msgs sensor_msgs visualization_msgs nav_msgs
   pcl_ros pcl_conversions livox_ros_driver2 tf2_ros rosidl_default_runtime)
 target_link_libraries(lio PUBLIC
-  basic_core Eigen3::Eigen ${PCL_LIBRARIES} glog
+  basic_core submap_registration Eigen3::Eigen ${PCL_LIBRARIES} glog
   ${cpp_typesupport_target})
 
 add_executable(super_lio_node src/apps/super_lio_node.cpp)
@@ -162,4 +164,12 @@ if(BUILD_TESTING)
   add_executable(submap_registration_test test/submap_registration_test.cpp)
   target_link_libraries(submap_registration_test PRIVATE submap_registration)
   add_test(NAME submap_registration_test COMMAND submap_registration_test)
+  add_executable(relocation_state_test test/relocation_state_test.cpp)
+  target_link_libraries(relocation_state_test PRIVATE lio submap_registration)
+  add_test(NAME relocation_state_test COMMAND relocation_state_test)
+  add_executable(relocation_motion_test test/relocation_motion_test.cpp)
+  target_link_libraries(relocation_motion_test PRIVATE lio)
+  add_test(NAME relocation_motion_test COMMAND relocation_motion_test)
+  set_tests_properties(relocation_motion_test PROPERTIES TIMEOUT 45
+    ENVIRONMENT "ROS_DOMAIN_ID=49;ROS_LOCALHOST_ONLY=1")
 endif()

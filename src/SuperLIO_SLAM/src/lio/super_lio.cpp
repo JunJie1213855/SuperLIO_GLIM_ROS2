@@ -426,6 +426,13 @@ void SuperLIO::Propagation_Undistort(){
     propagate_states_.emplace_back(kf_->GetDynamicState());
   }
 
+  if (!measures_.imu.empty() && kf_->GetTime()<measures_.lidar.end_time) {
+    auto end_imu=measures_.imu.back();
+    end_imu.secs=measures_.lidar.end_time;
+    kf_->Predict(end_imu);
+    propagate_states_.emplace_back(kf_->GetDynamicState());
+  }
+
   static const M3 TLI_R = g_lidar_imu.R_;
   static const V3 TLI_t = g_lidar_imu.t_;
   const SE3 T_end = kf_->GetSE3();
@@ -446,34 +453,25 @@ void SuperLIO::Propagation_Undistort(){
       const auto& pt = raw_pc->points[idx];
       pt_full.intensity = pt.intensity;
       double query_time = start_time + pt.offset_time;
-      if (query_time > propagate_states_.back().time) {
-        V3 raw(pt.x, pt.y, pt.z);
-        V3 eigen_point = TLI_R * raw + TLI_t;
-        pt_full.x = eigen_point[0];
-        pt_full.y = eigen_point[1];
-        pt_full.z = eigen_point[2];
-        continue;
+      auto upper=std::upper_bound(propagate_states_.begin(),propagate_states_.end(),query_time,
+          [](double time,const DynamicState& state) { return time<state.time; });
+      const DynamicState* left;
+      const DynamicState* right;
+      if (upper==propagate_states_.begin()) {
+        left=right=&propagate_states_.front();
+      } else if (upper==propagate_states_.end()) {
+        left=right=&propagate_states_.back();
+      } else {
+        right=&*upper; left=&*std::prev(upper);
       }
-      auto match_iter = propagate_states_.begin();
-      for (auto iter = propagate_states_.begin(); iter != propagate_states_.end(); ++iter) {
-        auto next_iter = std::next(iter);
-        if (iter->time < query_time && next_iter->time >= query_time) {
-          match_iter = iter;
-          break;
-        }
+      M3 R_i=left->R;
+      V3 p_i=left->p;
+      const double dt=right->time-left->time;
+      if (dt>1e-9) {
+        const double tau=std::clamp(query_time-left->time,0.0,dt);
+        R_i=Quat(left->R).slerp(tau/dt,Quat(right->R)).toRotationMatrix();
+        p_i=left->p+left->v*tau+.5f*right->a*tau*tau;
       }
-      auto match_iter_n = std::next(match_iter);
-      double dt = match_iter_n->time - match_iter->time;
-      double tau = query_time - match_iter->time;
-      double s   = tau / dt;
-      R_h = match_iter->R;
-      R_t = match_iter_n->R;
-      p_h = match_iter->p;
-      v_h = match_iter->v;
-      acc_t = match_iter_n->a;
-      w_t = match_iter_n->w;
-      M3 R_i = Quat(R_h).slerp(s, Quat(R_t)).toRotationMatrix();
-      V3 p_i = p_h + v_h * tau + 0.5 * acc_t * tau * tau;
       V3 t_ei = p_i - T_end_t;
       V3 raw(pt.x, pt.y, pt.z);
       V3 eigen_point = R_inv * (R_i * (TLI_R * raw + TLI_t) + t_ei);

@@ -450,8 +450,8 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
 
     odom_imu.header.stamp = outputStamp(data.secs);
     odom_robo.header.stamp = odom_imu.header.stamp;
-    odom_imu.header.frame_id = "world";
-    odom_robo.header.frame_id = "world";
+    odom_imu.header.frame_id = reference_frame_;
+    odom_robo.header.frame_id = reference_frame_;
     pub_imu_odom_->publish(odom_imu);
     pub_robo_odom_->publish(odom_robo);
   }
@@ -672,6 +672,8 @@ void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr ms
 
 bool ROSWrapper::sync_measure(MeasureGroup& meas){
   if (lidar_buffer_.empty() || imu_buffer_.empty()) {
+    RCLCPP_DEBUG_THROTTLE(get_logger(),*get_clock(),5000,
+        "LIO sync waiting: lidar=%zu imu=%zu",lidar_buffer_.size(),imu_buffer_.size());
     return false;
   }
 
@@ -709,7 +711,8 @@ bool ROSWrapper::sync_measure(MeasureGroup& meas){
 
 void ROSWrapper::pub_odom(const NavState& state){
   nav_msgs::msg::Odometry odom;
-  odom.header.frame_id = "world";
+  odom.header.frame_id = reference_frame_;
+  odom.child_frame_id = "imu";
 
   odom.header.stamp = outputStamp(state.timestamp);
   odom.pose.pose.position.x = state.p[0];
@@ -734,6 +737,7 @@ void ROSWrapper::pub_odom(const NavState& state){
     static auto pub_msg2uav_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
         "/mavros/vision_pose/pose", 10);
     M3 robo_rotation = state.R.R_ * g_odom_robo.R_;
+    msg2uav_.header.frame_id = reference_frame_;
     msg2uav_.header.stamp = odom.header.stamp;
     msg2uav_.pose.position.x = robo_position[0];
     msg2uav_.pose.position.y = robo_position[1];
@@ -750,36 +754,32 @@ void ROSWrapper::pub_odom(const NavState& state){
   {
     path_.header.stamp = odom.header.stamp;
     geometry_msgs::msg::PoseStamped point;
+    point.header = odom.header;
     point.pose = odom.pose.pose;
     path_.poses.push_back(point);
     pub_path_->publish(path_);
     last_path_point_ = robo_position;
   }
 
-  geometry_msgs::msg::TransformStamped tf_msg;
-
-  tf_msg.header.stamp = odom.header.stamp;
-  tf_msg.header.frame_id = "world";
-  tf_msg.child_frame_id = "imu";
-
-  tf_msg.transform.translation.x = state.p[0];
-  tf_msg.transform.translation.y = state.p[1];
-  tf_msg.transform.translation.z = state.p[2];
-
-  tf_msg.transform.rotation.x = temp_q.x();
-  tf_msg.transform.rotation.y = temp_q.y();
-  tf_msg.transform.rotation.z = temp_q.z();
-  tf_msg.transform.rotation.w = temp_q.w();
-
-  tf_broadcaster_->sendTransform(tf_msg);
-
-  // tf_msg.child_frame_id = "god";
-  // tf_msg.transform.rotation.x = 0.0;
-  // tf_msg.transform.rotation.y = 0.0;
-  // tf_msg.transform.rotation.z = 0.0;
-  // tf_msg.transform.rotation.w = 1.0;
-  // tf_broadcaster_->sendTransform(tf_msg);
-
+  const BASIC::SE3 pose = state.GetSE3();
+  const BASIC::SE3 local_pose = world_from_local_ ? world_from_local_->inverse()*pose : pose;
+  auto transform_message = [&](const BASIC::SE3& value, const std::string& parent, const std::string& child) {
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp=odom.header.stamp; tf.header.frame_id=parent; tf.child_frame_id=child;
+    tf.transform.translation.x=value.t_.x(); tf.transform.translation.y=value.t_.y(); tf.transform.translation.z=value.t_.z();
+    BASIC::Quat q(value.R_); q.normalize();
+    tf.transform.rotation.x=q.x(); tf.transform.rotation.y=q.y();
+    tf.transform.rotation.z=q.z(); tf.transform.rotation.w=q.w();
+    return tf;
+  };
+  if (relocation_frames_) {
+    std::vector<geometry_msgs::msg::TransformStamped> transforms;
+    transforms.push_back(transform_message(local_pose,"odom_local","imu"));
+    if (world_from_local_) transforms.push_back(transform_message(*world_from_local_,"world","odom_local"));
+    tf_broadcaster_->sendTransform(transforms);
+  } else {
+    tf_broadcaster_->sendTransform(transform_message(pose,"world","imu"));
+  }
 }
 
 
@@ -808,7 +808,7 @@ void ROSWrapper::pub_keyframe(const CloudPtr& cloud,
 void ROSWrapper::pub_cloud_world(const CloudPtr& pc, double time){
   sensor_msgs::msg::PointCloud2 cloud;
   pcl::toROSMsg(*pc, cloud);
-  cloud.header.frame_id = "world";
+  cloud.header.frame_id = reference_frame_;
   cloud.header.stamp = outputStamp(time);
   pub_cloud_world_->publish(cloud);
 }
@@ -817,7 +817,7 @@ void ROSWrapper::pub_cloud_world(const CloudPtr& pc, double time){
 void ROSWrapper::pub_cloud_world_dense(const CloudPtr& pc, double time){
   sensor_msgs::msg::PointCloud2 cloud;
   pcl::toROSMsg(*pc, cloud);
-  cloud.header.frame_id = "world";
+  cloud.header.frame_id = reference_frame_;
   cloud.header.stamp = outputStamp(time);
   pub_cloud_world_dense_->publish(cloud);
 }
@@ -921,6 +921,36 @@ void ROSWrapper::set_global_map(const BASIC::CloudPtr& global_map){
         global_map_msg_.header.stamp = this->now();
         global_map_pub->publish(global_map_msg_);
       });
+}
+
+
+void ROSWrapper::enableRelocationFrames() {
+  relocation_frames_=true;
+  reference_frame_="odom_local";
+  world_from_local_.reset();
+  path_.poses.clear();
+  path_.header.frame_id=reference_frame_;
+}
+
+void ROSWrapper::commitRelocationFrame(const BASIC::SE3& world_from_local) {
+  world_from_local_=world_from_local;
+  reference_frame_="world";
+  path_.poses.clear();
+  path_.header.frame_id=reference_frame_;
+  last_path_point_=BASIC::V3(0,0,-100);
+}
+
+double ROSWrapper::sensorTime(const builtin_interfaces::msg::Time& stamp) const {
+  return stampToSec(stamp)-output_time_offset_sec_;
+}
+
+void ROSWrapper::setRelocationInitialPoseCallback(
+    std::function<void(const geometry_msgs::msg::PoseWithCovarianceStamped&)> callback) {
+  rclcpp::SubscriptionOptions options;
+  options.callback_group=cb_sensor_;
+  relocation_initial_sub_=create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/initialpose",rclcpp::QoS(1),
+      [callback=std::move(callback)](geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) { callback(*msg); },options);
 }
 
 

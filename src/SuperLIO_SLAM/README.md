@@ -253,7 +253,7 @@ ros2 launch super_lio_slam Livox_mid360.launch.py \
 ros2 launch super_lio_slam robosense_airy.launch.py enable_loop_backend:=false
 ```
 
-Relocation accepts `sensor_config`, `use_sim_time`, `rviz`, `rviz_config` and logging arguments, and does not start a loop backend. Standalone STD extraction accepts `std_config`, `input_topic`, `output_dir`, a typed integer `max_visualized_descriptors`, `use_sim_time` and `log_level`. The copied entry in `std/ros2/launch` delegates to the installed `super_lio_slam` utility instead of referring to a separate `std_detector` package.
+Relocation accepts `sensor_config`, `relocation_config`, `map_path`, `use_sim_time`, `rviz`, `rviz_config` and logging arguments. It runs local LIO, fixed-S motion-compensated accumulation and asynchronous TEASER++/GICP, then rebases the complete KF state and switches to world-map tracking. It does not start a loop backend. See the [relocation runtime guide](../../docs/motion_compensated_relocalization_runtime.md) for commands, initialization requirements and frame semantics. Standalone STD extraction accepts `std_config`, `input_topic`, `output_dir`, a typed integer `max_visualized_descriptors`, `use_sim_time` and `log_level`. The copied entry in `std/ros2/launch` delegates to the installed `super_lio_slam` utility instead of referring to a separate `std_detector` package.
 
 GLIM in this workspace has no Python launch files; its existing Offline Viewer entry point is unchanged.
 

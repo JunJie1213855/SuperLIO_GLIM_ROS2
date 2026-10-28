@@ -1,341 +1,361 @@
-
 #include "lio/super_lio_reloc.h"
 
-#include <sys/resource.h>
-#include <tbb/parallel_for.h>
-#include <tbb/blocked_range.h>
-#include <tbb/concurrent_vector.h>
-#include <tbb/enumerable_thread_specific.h>
-
-#include <pcl/registration/icp.h>
-#include <pcl/registration/ndt.h>
-#include <pcl/kdtree/kdtree_flann.h>
-
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <limits>
+#include <stdexcept>
+#include <pcl/common/transforms.h>
+#include <pcl/filters/filter.h>
 
 using namespace BASIC;
+namespace LI2Sup {
+using namespace super_lio_slam;
 
-namespace LI2Sup{
+SuperLIOReLoc::~SuperLIOReLoc() {
+  stopping_=true;
+  registration_cv_.notify_all();
+  if (registration_thread_.joinable()) registration_thread_.join();
+}
 
-inline bool calc_plane_coeff(const int N, const std::array<V3, 5>& points, std::array<double, 4>& abcd)
-{
-  Eigen::Vector3d normvec;
-  if (N == 5) {
-    Eigen::Matrix<double, 5, 3> A;
-    Eigen::Matrix<double, 5, 1> b;
-    for (int j = 0; j < 5; j++) {
-      A.row(j) = points[j].cast<double>();
-      b(j) = -1.0;
+void SuperLIOReLoc::setStatus(const std::string& status) {
+  if (status_==status) return;
+  status_=status;
+  std_msgs::msg::String msg; msg.data=status;
+  status_pub_->publish(msg);
+  RCLCPP_INFO(data_wrapper_->get_logger(),"Relocation state: %s",status.c_str());
+}
+
+void SuperLIOReLoc::init() {
+#ifndef SUPERLIO_WITH_TEASER
+  throw std::runtime_error("Motion-compensated relocation requires SUPERLIO_WITH_TEASER=ON");
+#endif
+  SuperLIO::init();
+  keyframe_enabled_=false; // Never mix local-S keyframes into the world-frame loop graph.
+  data_wrapper_->enableRelocationFrames();
+  auto& node=*data_wrapper_;
+  auto positive=[&](const char* key,double value) {
+    const auto result=node.declare_parameter<double>(key,value);
+    if (!std::isfinite(result) || result<=0) throw std::invalid_argument(std::string(key)+" must be finite and positive");
+    return result;
+  };
+  auto integer=[&](const char* key,int value,int low,int high) {
+    const auto result=node.declare_parameter<int>(key,value);
+    if (result<low || result>high) throw std::invalid_argument(std::string(key)+" is outside its supported range");
+    return result;
+  };
+  SubmapLimits limits;
+  limits.max_frames=integer("relocation.window_max_frames",10,2,100);
+  limits.max_duration=positive("relocation.window_max_duration_s",3.0);
+  limits.max_travel=positive("relocation.window_max_travel_m",5.0);
+  window_=SubmapWindow(limits);
+  min_frames_=integer("relocation.window_min_frames",5,2,limits.max_frames);
+  imu_samples_=integer("relocation.imu_init_samples",50,20,10000);
+  init_duration_=positive("relocation.imu_init_duration_s",.3);
+  max_gyro_=positive("relocation.imu_max_gyro_rad_s",.15);
+  max_gyro_std_=positive("relocation.imu_max_gyro_std",.02);
+  max_accel_std_=positive("relocation.imu_max_accel_std",.15);
+  min_plane_points_=integer("relocation.local_min_plane_points",30,6,20000);
+  keyframe_distance_=positive("relocation.keyframe_distance_m",.2);
+  keyframe_angle_=positive("relocation.keyframe_angle_deg",5.0);
+  keyframe_interval_=positive("relocation.keyframe_max_interval_s",.3);
+  registration_interval_=positive("relocation.registration_interval_s",1.0);
+  crop_radius_=node.declare_parameter<double>("relocation.map_crop_radius_m",80.0);
+  if (!std::isfinite(crop_radius_) || crop_radius_<0) throw std::invalid_argument("map crop radius must be nonnegative");
+  gravity_angle_=positive("relocation.max_gravity_angle_deg",10.0);
+  if (gravity_angle_>180) throw std::invalid_argument("gravity angle must be <=180 degrees");
+  const auto position_sigma=positive("relocation.registration_position_sigma_m",.2);
+  const auto rotation_sigma=positive("relocation.registration_rotation_sigma_deg",2.0)*M_PI/180.0;
+  position_variance_=position_sigma*position_sigma;
+  rotation_variance_=rotation_sigma*rotation_sigma;
+  have_prior_=node.declare_parameter<bool>("relocation.use_initial_pose",true);
+  const M3 R=(Eigen::AngleAxisf(g_init_yaw*M_PI/180.0,V3::UnitZ())*
+              Eigen::AngleAxisf(g_init_pitch*M_PI/180.0,V3::UnitY())*
+              Eigen::AngleAxisf(g_init_roll*M_PI/180.0,V3::UnitX())).toRotationMatrix();
+  prior_pose_=SE3(R,V3(g_init_px,g_init_py,g_init_pz));
+
+  auto& s=settings_;
+  s.voxel=positive("registration_voxel_size_m",.5);
+  s.min_points=integer("registration_min_points",100,30,100000);
+  s.max_source=integer("registration_max_source_points",10000,100,100000);
+  s.max_target=integer("registration_max_target_points",50000,100,200000);
+  s.normal_radius=positive("fpfh_normal_radius_m",1.0);
+  s.feature_radius=positive("fpfh_feature_radius_m",2.5);
+  s.feature_ratio=positive("fpfh_distance_ratio_threshold",.9);
+  s.hint_radius=positive("fpfh_pose_hint_radius_m",3.0);
+  s.min_pairs=integer("correspondence_min_unique",6,3,500);
+  s.max_pairs=integer("correspondence_max_unique",200,3,500);
+  s.min_baseline=positive("correspondence_min_baseline_m",2.0);
+  s.noise_bound=positive("teaser_noise_bound_m",.3);
+  s.rotation_iterations=integer("teaser_rotation_max_iterations",100,1,1000);
+  s.clique_seconds=positive("teaser_max_clique_time_limit_s",.05);
+  s.threads=integer("teaser_max_clique_num_threads",2,1,16);
+  s.coarse_radius=positive("coarse_residual_threshold_m",.6);
+  s.coarse_min_inliers=integer("coarse_min_inliers",6,3,500);
+  s.coarse_min_ratio=positive("coarse_min_inlier_ratio",.3);
+  s.coarse_max_rmse=positive("coarse_max_inlier_rmse_m",.3);
+  s.max_iterations=integer("gicp_max_iterations",40,1,200);
+  s.covariance_neighbors=integer("gicp_correspondence_randomness",20,4,100);
+  s.correspondence_distance=positive("gicp_max_correspondence_distance_m",2.0);
+  s.quality_radius=positive("quality_nn_radius_m",1.0);
+  s.min_overlap=positive("quality_min_source_overlap",.8);
+  s.min_current_overlap=positive("quality_min_current_frame_overlap",.8);
+  s.min_inliers=integer("quality_min_inlier_count",100,3,100000);
+  s.max_mse=positive("quality_max_inlier_mse_m2",.1);
+  s.min_information_ratio=positive("quality_min_information_ratio",1e-5);
+  s.max_translation=positive("quality_max_refinement_translation_m",5.0);
+  s.max_rotation_deg=positive("quality_max_refinement_rotation_deg",20.0);
+  if (s.feature_radius<=s.normal_radius || s.feature_ratio>1 || s.min_pairs>s.max_pairs ||
+      s.coarse_min_ratio>1 || s.min_overlap>=1 || s.min_current_overlap>=1)
+    throw std::invalid_argument("inconsistent relocation feature/quality parameters");
+  rclcpp::PublisherOptions status_options;
+  status_options.use_intra_process_comm=rclcpp::IntraProcessSetting::Disable;
+  status_pub_=node.create_publisher<std_msgs::msg::String>("/lio/relocation/status",
+      rclcpp::QoS(1).reliable().transient_local(),status_options);
+  setStatus("LOAD_REFERENCE_MAP");
+  std::string map_path=node.declare_parameter<std::string>("relocation.map_path","");
+  if (map_path.empty()) map_path=g_save_map_dir+"/"+g_map_name;
+  reference_cloud_.reset(new PointCloudType);
+  if (pcl::io::loadPCDFile<PointType>(map_path,*reference_cloud_)<0)
+    throw std::runtime_error("Cannot load relocation reference map: "+map_path);
+  CloudPtr finite(new PointCloudType);
+  VV3 points;
+  for (const auto& p:*reference_cloud_) if (p.getVector3fMap().allFinite()) {
+    finite->push_back(p); points.push_back(p.getVector3fMap());
+  }
+  reference_cloud_=finite;
+  if (points.size()<static_cast<std::size_t>(s.min_points)) throw std::runtime_error("Relocation reference map is empty/sparse");
+  reference_ivox_.reset(new OctVoxMapType(OctVoxMapType::Options{g_ivox_resolution,g_ivox_capacity}));
+  reference_ivox_->insert(points);
+  reference_tree_.setInputCloud(reference_cloud_);
+  local_ivox_=ivox_;
+  data_wrapper_->set_global_map(reference_cloud_);
+  data_wrapper_->setRelocationInitialPoseCallback([this](const auto& msg) { receivePrior(msg); });
+  setStatus("WAITING_FOR_STATIONARY_IMU");
+  registration_thread_=std::thread(&SuperLIOReLoc::registrationWorker,this);
+  RCLCPP_INFO(node.get_logger(),"Relocation reference loaded: %zu points, %s",points.size(),map_path.c_str());
+}
+
+bool SuperLIOReLoc::initializeLocal() {
+  for (const auto& imu:measures_.imu) {
+    if (!imu.acc.allFinite() || !imu.gyr.allFinite() || imu.gyr.norm()>max_gyro_) {
+      initialization_imu_.clear(); continue;
     }
-    normvec = A.colPivHouseholderQr().solve(b);
+    initialization_imu_.push_back(imu);
   }
-  else {
-    Eigen::Matrix<double, 4, 3> A;
-    Eigen::Matrix<double, 4, 1> b;
-
-    for (int j = 0; j < N; j++) {
-      A.row(j) = points[j].cast<double>();
-      b(j) = -1.0;
-    }
-    normvec = A.colPivHouseholderQr().solve(b);
+  while (initialization_imu_.size()>std::max<std::size_t>(imu_samples_*4,1000)) initialization_imu_.pop_front();
+  RCLCPP_INFO_THROTTLE(data_wrapper_->get_logger(),*data_wrapper_->get_clock(),5000,
+      "Relocation IMU initialization: samples=%zu scan_points=%zu",initialization_imu_.size(),measures_.lidar.pc->size());
+  if (initialization_imu_.size()<imu_samples_ ||
+      initialization_imu_.back().secs-initialization_imu_.front().secs<init_duration_) return false;
+  V3 mean_acc=V3::Zero(),mean_gyro=V3::Zero(),acc_square=V3::Zero(),gyro_square=V3::Zero();
+  for (const auto& imu:initialization_imu_) {
+    mean_acc+=imu.acc; mean_gyro+=imu.gyr;
+    acc_square+=imu.acc.cwiseProduct(imu.acc); gyro_square+=imu.gyr.cwiseProduct(imu.gyr);
   }
-
-  double n = normvec.norm();
-  if (n < 1e-6f) return false;
-
-  abcd[3] = 1.0 / n;
-  normvec *= abcd[3];
-  abcd[0] = normvec[0];
-  abcd[1] = normvec[1];
-  abcd[2] = normvec[2];
-  
-  for (int i = 0; i < N; ++i) {
-    const V3& p = points[i];
-    auto dist = abcd[0] * p(0) + abcd[1] * p(1) + abcd[2] * p(2) + abcd[3];
-    if (std::abs(dist) > 0.1) return false;
+  const float n=initialization_imu_.size();
+  mean_acc/=n; mean_gyro/=n;
+  const float acc_std=(acc_square/n-mean_acc.cwiseProduct(mean_acc)).cwiseMax(0).sum();
+  const float gyro_std=(gyro_square/n-mean_gyro.cwiseProduct(mean_gyro)).cwiseMax(0).sum();
+  if (std::sqrt(acc_std)>max_accel_std_ || std::sqrt(gyro_std)>max_gyro_std_ || mean_acc.norm()<1e-3) {
+    initialization_imu_.clear(); return false;
   }
-  return true;
-}
-
-
-inline bool compute_error(
-  const std::array<double, 4>& abcd, const V3& point, 
-  const float length, scalar& error)
-{
-  error = abcd[0] * point[0] + abcd[1] * point[1] + abcd[2] * point[2] + abcd[3];
-  return length > 81 * error * error;
-}
-
-
-void SuperLIOReLoc::init(){
-  ivox_.reset(new OctVoxMapType(OctVoxMapType::Options{g_ivox_resolution, g_ivox_capacity}));
-  kf_.reset(new ESKF());
-  data_wrapper_->setESKF(kf_);
-  
-  scan_undistort_full_.reset(new PointCloudType());
-  ds_undistort_.reset(new PointCloudType());
-  world_pc_.reset(new PointCloudType());
-  ds_world_.reset(new PointCloudType());
-  point_map_.reset(new PointCloudType());
-  init_obs_data_.reset(new PointCloudType());
-  
-  points_world_v3_.reserve(21000);
-  abcd_vec_.resize(20000);
-  effect_knn_idxs_.resize(20000);
-  voxel_grid_fliter_.setLeafSize(g_voxel_fliter_size);
-
-  LOG(INFO) << GREEN << " ---> [SuperLIO]: initialized." << RESET;
-
-  auto start_time = std::chrono::high_resolution_clock::now();
-  SuperLIOReLoc::map_init();
-  auto end_time = std::chrono::high_resolution_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-  LOG(INFO) << GREEN << " ---> [SuperLIO]: Map init success. Time: " << duration.count() << " ms." << RESET;
-
-  state_fn_ = &SuperLIOReLoc::stateWaitKFInit;
-}
-
-
-bool SuperLIOReLoc::map_init(){
-  static bool pcd_loaded = false;
-  if(pcd_loaded) return true;
-
-  std::string map_name = g_save_map_dir + "/" + g_map_name;
-  if(pcl::io::loadPCDFile<PointType>(map_name, *point_map_) == -1){
-    LOG(ERROR) << RED << " ---> Load map failed. File: " << map_name << RESET;
-    return false;
-  }
-
-  std::vector<int> useless_indices;
-  pcl::removeNaNFromPointCloud(*point_map_, *point_map_, useless_indices);
-
-  VV3 point_map_v3;
-  point_map_v3.reserve(point_map_->size());
-  for(const auto& point: *point_map_){
-    V3 pt(point.x, point.y, point.z);
-    point_map_v3.push_back(pt);
-  }
-
-  ivox_->insert(point_map_v3);
-
-  LOG(INFO) << GREEN << " ---> Load map success. File: " << map_name << RESET;
-  LOG(INFO) << GREEN << " ---> Map size: " << point_map_->size() << RESET;
-  ivox_->printInfo();
-
-  pcd_loaded = true;
-
-  data_wrapper_->set_global_map(point_map_);
-  data_wrapper_->set_initial_data(re_init_pose_, flg_get_init_guess_);
-  return true;
-}
-
-
-bool SuperLIOReLoc::kf_init(){
-  const int need_init_frames = 10;
-  static int imu_cout = 0;
-  static int init_frame_count = 0;
-  static V3 mean_gyro = V3::Zero();
-  static V3 mean_acce = V3::Zero();
-
-  /// get init guess from ROS topic.
-  if(flg_get_init_guess_){
-    imu_cout = 0;
-    init_frame_count = 0;
-    init_obs_data_->clear();
-    mean_gyro = V3::Zero();
-    mean_acce = V3::Zero();
-    flg_get_init_guess_ = false;
-    return false;
-  }
-
-  // 获取当前测量点云
-  CloudPtr point_cloud_pcl = CloudPtr(new PointCloudType());
-  for(std::size_t i = 0; i < measures_.lidar.pc->size(); i++){
-    auto p = measures_.lidar.pc->points[i];
-    PointType point;
-    point.x = p.x;
-    point.y = p.y;
-    point.z = p.z;
-    point.intensity = p.intensity;
-    point_cloud_pcl->points.push_back(point);
-  }
-
-  // 点云累积
-  if(init_frame_count < need_init_frames){
-    *init_obs_data_ += *point_cloud_pcl;
-  }
-  init_frame_count++;
-
-  // imu 样本累积
-  for(auto& imu: measures_.imu){
-    imu_cout ++;
-    mean_gyro += (imu.gyr - mean_gyro) / imu_cout;
-    mean_acce += (imu.acc - mean_acce) / imu_cout;
-  }
-
-  // imu 样本样大于 20 才能继续重定位
-  if(imu_cout < 20){
-    return false;
-  }
-
-  // 必须要大于所需要的点云帧数才可以初始化
-  if(init_frame_count < need_init_frames){
-    return false;
-  }
-
-  LOG(INFO) << YELLOW << " ---> INIT start... obs_data size: " << init_obs_data_->size() << " target size: " << point_map_->size() << RESET;
-
-  // 重力初始化
-  V3 gravity = - mean_acce * g_gravity_norm / mean_acce.norm();
-  V3 ref_gravity(0, 0, - g_gravity_norm);
-  M3 init_rot = Quat::FromTwoVectors(gravity, ref_gravity).toRotationMatrix();
-  V3 n = init_rot.col(0);
-  double yaw = atan2(n(1), n(0));
-
-  M3 R_yaw_inv = Eigen::AngleAxis<scalar>(-yaw, V3::UnitZ()).toRotationMatrix(); 
-  M3 rot = R_yaw_inv * init_rot;
-
-  M3 init_guess_R_ = re_init_pose_.R_ * rot;
-  V3 init_guess_t_ = re_init_pose_.t_;
-  M4 init_guess_T = M4::Identity();
-  init_guess_T.block<3, 3>(0, 0) = init_guess_R_;
-  init_guess_T.block<3, 1>(0, 3) = init_guess_t_;
-
-
-  pcl::PointCloud<pcl::PointXYZI>::Ptr tmp_src(new pcl::PointCloud<pcl::PointXYZI>());
-  pcl::transformPointCloud(*init_obs_data_, *tmp_src, g_lidar_imu.matrix().cast<float>());
-
-  // ndt 粗配准
-  pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
-  ndt.setTransformationEpsilon(1e-4);
-  ndt.setEuclideanFitnessEpsilon(1e-4);
-  ndt.setMaximumIterations(25);
-  ndt.setResolution(1.0);
-  ndt.setInputTarget(point_map_);
-
-  // icp 精配准
-  pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
-  icp.setMaxCorrespondenceDistance(4.0);
-  icp.setMaximumIterations(40);
-  icp.setTransformationEpsilon(1e-4);
-  icp.setEuclideanFitnessEpsilon(1e-4);
-  icp.setRANSACIterations(0);
-  icp.setInputTarget(point_map_);
-
-  ndt.setInputSource(tmp_src);
-  icp.setInputSource(tmp_src);
-
-  pcl::PointCloud<pcl::PointXYZI>::Ptr unused_result(new pcl::PointCloud<pcl::PointXYZI>());
-  ndt.align(*unused_result, init_guess_T.matrix().cast<float>());
-  icp.align(*unused_result, ndt.getFinalTransformation());
-
-  if (icp.hasConverged() == false || icp.getFitnessScore() > 1.5)
-  // if (icp.hasConverged() == false)
-  {
-    /// reset init state.
-    imu_cout = 0;
-    init_frame_count = 0;
-    init_obs_data_->clear();
-    mean_gyro = V3::Zero();
-    mean_acce = V3::Zero();
-    LOG(INFO) << RED << " ---> Global ICP Converged Fail! FitnessScore: " << icp.getFitnessScore() << RESET;
-    return false;
-  } else{
-    init_guess_T = icp.getFinalTransformation().cast<scalar>();
-    LOG(INFO) << GREEN << " ---> Global ICP Converged Succeed! FitnessScore: " << icp.getFitnessScore() << RESET;
-  }
-
-  LOG(INFO) << GREEN << "\n" << init_guess_T << RESET;
-
-  // 初始化 kf
+  const M3 rotation=Quat::FromTwoVectors(mean_acc,V3::UnitZ()).toRotationMatrix();
   ESKF::Options options;
-  options.gyro_var_ = g_imu_ng;
-  options.acce_var_ = g_imu_na;
-  options.bias_gyro_var_ = g_imu_nbg;
-  options.bias_acce_var_ = g_imu_nba;
-  options.num_iterations_ = g_kf_max_iterations;
-  options.quit_eps_ = g_kf_quit_eps;
-
-  float imu_scale = g_gravity_norm / mean_acce.norm();
-  kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), imu_scale, ref_gravity);
-  auto state = kf_->GetSysState();
-  
-  // 用 icp 精配准的位姿 init_guess_T 进行初始化
-  /// The horizontal initial state of the imu in the robot coordinate system.
-  state.R = SO3(init_guess_T.block<3, 3>(0, 0));
-  state.p = init_guess_T.block<3, 1>(0, 3);
-  state.timestamp = -1.0;
-  kf_->SetX(state);
-  sys_init_pose_ = kf_->GetSE3();
-
-  {
-    point_map_->clear();
-    point_map_.reset(new PointCloudType());
-    init_obs_data_->clear();
-    init_obs_data_ = nullptr;
-    data_wrapper_->set_initial_data(re_init_pose_, flg_get_init_guess_, true);
+  options.gyro_var_=g_imu_ng; options.acce_var_=g_imu_na;
+  options.bias_gyro_var_=g_imu_nbg; options.bias_acce_var_=g_imu_nba;
+  options.num_iterations_=g_kf_max_iterations; options.quit_eps_=g_kf_quit_eps;
+  kf_->SetInitialConditions(options,mean_gyro,V3::Zero(),g_gravity_norm/mean_acc.norm(),V3(0,0,-g_gravity_norm));
+  kf_->InitializePrediction(SysState(measures_.lidar.end_time,SO3(rotation)),initialization_imu_.back());
+  scan_undistort_full_->clear();
+  // Only one stationary scan seeds the local map. Moving scans use propagation/deskew below.
+  for (const auto& p:*measures_.lidar.pc) {
+    const V3 body=g_lidar_imu*V3(p.x,p.y,p.z);
+    PointType out; out.getVector3fMap()=body; out.intensity=p.intensity;
+    scan_undistort_full_->push_back(out);
   }
-
+  DownSample(); limitScan();
+  if (ds_undistort_->size()<static_cast<std::size_t>(min_plane_points_)) { kf_->init_=false; return false; }
+  VV3 points;
+  for (const auto& p:*ds_undistort_) points.push_back(rotation*p.getVector3fMap());
+  local_ivox_->insert(points);
+  sys_init_pose_=kf_->GetSE3();
+  prior_local_pose_=sys_init_pose_;
+  stage_=Stage::Local; tracking_good_=true;
+  rememberFrame();
+  initialization_imu_.clear();
+  setStatus("LOCAL_TRACKING");
+  Output();
   return true;
 }
 
-
-void SuperLIOReLoc::UpdateMap() {
-  if(!g_update_map) return;
-  
-  static int __update_delay = 100;
-  if(__update_delay > 0){
-    __update_delay--;
-    std::cout << "Update map Delay: " << 100 - __update_delay << " %" << std::endl;
-    return;
-  }
-
-  const size_t ptsize = ds_undistort_->size();
-  if (ptsize == 0) return;
-  
-  last_pose_ = kf_->GetSE3();
-  points_world_v3_.resize(ptsize);
-  
-  const auto R = last_pose_.R_;
-  const auto t = last_pose_.t_;
-  
-  for (size_t i = 0; i < ptsize; ++i) {
-    const auto& pt = points_body_v3_[i];
-    points_world_v3_[i] = R * pt + t;
-  }
-  
-  ivox_->insert(points_world_v3_);
-
+void SuperLIOReLoc::limitScan() {
+  if (ds_undistort_->size()<=20000) return;
+  CloudPtr capped(new PointCloudType);
+  for (std::size_t i=0;i<20000;++i) capped->push_back((*ds_undistort_)[i*ds_undistort_->size()/20000]);
+  ds_undistort_=capped;
 }
 
+void SuperLIOReLoc::rememberFrame() {
+  const auto pose=kf_->GetSE3();
+  if (!window_.entries().empty()) {
+    const auto& last=window_.entries().back();
+    const auto delta=last.odom_pose.inverse()*Eigen::Isometry3d(pose.matrix().cast<double>());
+    if (delta.translation().norm()<keyframe_distance_ &&
+        Eigen::AngleAxisd(delta.rotation()).angle()*180/M_PI<keyframe_angle_ &&
+        measures_.lidar.end_time-last.stamp<keyframe_interval_) return;
+  }
+  CloudPtr cloud(new PointCloudType(*scan_undistort_full_));
+  window_.append({next_frame_++,measures_.lidar.end_time,Eigen::Isometry3d(pose.matrix().cast<double>()),cloud});
+}
+
+void SuperLIOReLoc::enqueueRegistration() {
+  if (window_.entries().size()<static_cast<std::size_t>(min_frames_) ||
+      (last_task_time_>=0 && measures_.lidar.end_time-last_task_time_<registration_interval_)) return;
+  RelocationSnapshot task;
+  task.generation=generation_; task.stamp=measures_.lidar.end_time;
+  task.window=window_; task.reference=reference_cloud_;
+  task.local_gravity=kf_->GetGravity().cast<double>();
+  if (have_prior_) task.world_from_local_hint=(prior_pose_*prior_local_pose_.inverse()).matrix().cast<double>();
+  {
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    pending_task_=std::move(task); // Latest pending window wins; running solver is not interrupted.
+  }
+  last_task_time_=measures_.lidar.end_time;
+  registration_cv_.notify_one();
+}
+
+void SuperLIOReLoc::registrationWorker() {
+  while (!stopping_) {
+    RelocationSnapshot task;
+    {
+      std::unique_lock<std::mutex> lock(registration_mutex_);
+      registration_cv_.wait(lock,[this] { return stopping_ || pending_task_.has_value(); });
+      if (stopping_) return;
+      task=std::move(*pending_task_); pending_task_.reset();
+    }
+    RelocationResult result;
+    try { result=registerRelocation(task,settings_,crop_radius_,gravity_angle_); }
+    catch (const std::exception& e) {
+      result.generation=task.generation; result.stamp=task.stamp;
+      result.registration.reason=std::string("exception: ")+e.what();
+    }
+    const auto& r=result.registration;
+    RCLCPP_INFO(data_wrapper_->get_logger(),
+      "Relocation registration: generation=%lu stamp=%.6f stage=%s coarse=%zu/%zu rmse=%.4f "
+      "mse=%.4f overlap=%.3f current_overlap=%.3f",
+      static_cast<unsigned long>(result.generation),result.stamp,r.reason.c_str(),r.coarse_inliers,r.pairs,
+      r.coarse_rmse,r.mse,r.overlap,r.current_overlap);
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    if (!stopping_) pending_result_=std::move(result);
+  }
+}
+
+bool SuperLIOReLoc::commitRegistration() {
+  std::optional<RelocationResult> result;
+  {
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    result=std::move(pending_result_); pending_result_.reset();
+  }
+  if (!result || result->generation!=generation_ || !result->registration.accepted || !tracking_good_) return false;
+  const auto& transform=result->registration.transform;
+  if (!validRigidTransform(transform)) return false;
+  // A delayed snapshot must also align the latest moving scan before the handoff.
+  const Eigen::Matrix4f current=(transform*kf_->GetSE3().matrix().cast<double>()).cast<float>();
+  CloudPtr aligned(new PointCloudType);
+  pcl::transformPointCloud(*ds_undistort_,*aligned,current);
+  std::vector<int> indices(1); std::vector<float> distances(1);
+  std::size_t inliers=0; double sum=0;
+  for (const auto& p:*aligned)
+    if (reference_tree_.nearestKSearch(p,1,indices,distances)==1 && distances[0]<=settings_.quality_radius*settings_.quality_radius) {
+      ++inliers; sum+=distances[0];
+    }
+  const double overlap=aligned->empty()?0:static_cast<double>(inliers)/aligned->size();
+  const double mse=inliers?sum/inliers:std::numeric_limits<double>::infinity();
+  if (inliers<static_cast<std::size_t>(settings_.min_inliers) || overlap<=settings_.min_current_overlap || mse>=settings_.max_mse) {
+    RCLCPP_WARN(data_wrapper_->get_logger(),"Delayed relocation rejected at latest scan: mse=%.4f overlap=%.3f",mse,overlap);
+    return false;
+  }
+  const SE3 world_from_local(transform.cast<scalar>());
+  const double latest_time=kf_->GetTime();
+  kf_->ChangeReferenceFrame(world_from_local,position_variance_,rotation_variance_);
+  sys_init_pose_=world_from_local*sys_init_pose_;
+  last_pose_=kf_->GetSE3();
+  propagate_states_.clear(); points_world_v3_.clear();
+  world_pc_->clear(); ds_world_->clear();
+  ivox_=reference_ivox_; local_ivox_.reset();
+  data_wrapper_->commitRelocationFrame(world_from_local);
+  stage_=Stage::World; ++generation_;
+  stopping_=true; registration_cv_.notify_all();
+  window_=SubmapWindow();
+  {
+    std::lock_guard<std::mutex> lock(registration_mutex_);
+    pending_task_.reset(); pending_result_.reset();
+  }
+  setStatus("WORLD_MAP_TRACKING");
+  RCLCPP_INFO(data_wrapper_->get_logger(),
+    "Relocation committed: snapshot=%.6f latest=%.6f preserved_time=%.6f mse=%.4f overlap=%.3f",
+    result->stamp,measures_.lidar.end_time,latest_time,mse,overlap);
+  return true;
+}
+
+void SuperLIOReLoc::receivePrior(const geometry_msgs::msg::PoseWithCovarianceStamped& msg) {
+  if (stage_==Stage::World || stage_==Stage::Failed) {
+    RCLCPP_WARN(data_wrapper_->get_logger(),"Relocation already completed/failed; restart for a new localization session"); return;
+  }
+  if (!msg.header.frame_id.empty() && msg.header.frame_id!="world") {
+    RCLCPP_WARN(data_wrapper_->get_logger(),"Initial pose must be expressed in world"); return;
+  }
+  const auto& p=msg.pose.pose.position; const auto& q=msg.pose.pose.orientation;
+  Quat rotation(q.w,q.x,q.y,q.z);
+  if (!V3(p.x,p.y,p.z).allFinite() || !rotation.coeffs().allFinite() || rotation.norm()<1e-6) return;
+  SE3 local_pose=kf_->GetSE3();
+  if (stage_==Stage::Local && (msg.header.stamp.sec!=0 || msg.header.stamp.nanosec!=0)) {
+    const double stamp=data_wrapper_->sensorTime(msg.header.stamp);
+    auto best=window_.entries().end(); double gap=.25;
+    for (auto it=window_.entries().begin();it!=window_.entries().end();++it)
+      if (std::abs(it->stamp-stamp)<=gap) { best=it; gap=std::abs(it->stamp-stamp); }
+    if (best==window_.entries().end()) {
+      RCLCPP_WARN(data_wrapper_->get_logger(),"Initial pose timestamp has no matching local keyframe (tolerance 0.25 s)"); return;
+    }
+    local_pose=SE3(best->odom_pose.matrix().cast<scalar>());
+  }
+  rotation.normalize(); prior_pose_=SE3(rotation,V3(p.x,p.y,p.z));
+  prior_local_pose_=local_pose; have_prior_=true; ++generation_; last_task_time_=-1;
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  pending_task_.reset(); pending_result_.reset();
+}
+
+void SuperLIOReLoc::process() {
+  if (!data_wrapper_->sync_measure(measures_) || stage_==Stage::Failed) return;
+  if (!std::isfinite(measures_.lidar.end_time) || measures_.lidar.end_time<=last_scan_time_) {
+    stage_=Stage::Failed; setStatus("ERROR_SENSOR_TIME_ROLLBACK"); return;
+  }
+  last_scan_time_=measures_.lidar.end_time;
+  if (stage_==Stage::Bootstrap) { initializeLocal(); return; }
+  Propagation_Undistort(); DownSample(); limitScan(); Observe();
+  tracking_good_=0;
+  int planes=0;
+  for (std::size_t i=0;i<ds_undistort_->size();++i) if (effect_mask_[i]) ++planes;
+  tracking_good_=planes>=min_plane_points_ && kf_->GetSE3().matrix().allFinite();
+  if (stage_==Stage::Local) {
+    if (tracking_good_) {
+      SuperLIO::UpdateMap(); rememberFrame();
+      if (!commitRegistration()) { enqueueRegistration(); setStatus("LOCAL_TRACKING"); }
+    } else { setStatus("LOCAL_TRACKING_DEGRADED"); }
+  } else if (g_update_map && tracking_good_) {
+    SuperLIO::UpdateMap();
+  }
+  Output();
+}
 
 void SuperLIOReLoc::Output() {
-  auto state = kf_->GetNavState();
-  data_wrapper_->pub_odom(state);  
-
-  Eigen::Matrix4f transformation = Eigen::Matrix4f::Identity();
-  transformation.block<3, 3>(0, 0) = state.R.R_.cast<float>();
-  transformation.block<3, 1>(0, 3) = state.p.cast<float>();
-
-  CloudPtr world_pc(new PointCloudType());
-  
-  if(g_visual_map){
-    static int count = -1;
-    count++;
-    if(count % g_pub_step != 0){
-      return;
-    }
-    count = 0;
-    if(g_visual_dense){
-      pcl::transformPointCloud(*scan_undistort_full_, *world_pc, transformation);
-      data_wrapper_->pub_cloud_world(world_pc, state.timestamp);
-    }else{
-      pcl::transformPointCloud(*ds_undistort_, *world_pc, transformation);
-      data_wrapper_->pub_cloud_world(world_pc, state.timestamp);
-    }
-  }
-
+  const auto state=kf_->GetNavState();
+  data_wrapper_->pub_odom(state);
+  if (!g_visual_map) return;
+  CloudPtr transformed(new PointCloudType);
+  pcl::transformPointCloud(*(g_visual_dense?scan_undistort_full_:ds_undistort_),*transformed,
+                           state.GetSE3().matrix());
+  data_wrapper_->pub_cloud_world(transformed,state.timestamp);
 }
-
-
-
-} // namespace END.
+}  // namespace LI2Sup

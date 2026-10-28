@@ -1,4 +1,5 @@
 #include "lio/ESKF.h"
+#include <stdexcept>
 
 using namespace BASIC;
 
@@ -96,6 +97,48 @@ void ESKF::SetX(const SysState& x) {
   fw_v_ = v_;
 }
 
+
+void ESKF::InitializePrediction(const SysState& state, const IMUData& last_imu) {
+  SetX(state);
+  last_imu_ = last_imu;
+  last_imu_time_ = last_imu.secs;
+  current_time_ = state.timestamp;
+  last_obs_time_ = current_obs_time_ = state.timestamp;
+  forward_time_ = state.timestamp;
+  forward_last_imu_ = last_imu;
+  global_acc_ = R_.R_ * (imu_scale_ * last_imu.acc - ba_) + g_;
+  body_omega_ = last_imu.gyr - bg_;
+  dx_.setZero();
+  init_ = true;
+}
+
+void ESKF::ChangeReferenceFrame(const SE3& transform, double position_variance,
+                               double rotation_variance) {
+  const M3 A = transform.R_;
+  if (!A.allFinite() || !transform.t_.allFinite() ||
+      (A.transpose()*A-M3::Identity()).norm()>1e-3 || std::abs(A.determinant()-1)>1e-3 ||
+      !std::isfinite(position_variance) || position_variance<0 ||
+      !std::isfinite(rotation_variance) || rotation_variance<0)
+    throw std::invalid_argument("invalid ESKF reference transform or uncertainty");
+  M18 J = M18::Identity();
+  J.block<3,3>(3,3) = A;
+  J.block<3,3>(6,6) = A;
+  J.block<3,3>(15,15) = A;
+  P_ = (J * P_ * J.transpose()).eval();
+  P_.block<3,3>(0,0) += rotation_variance * M3::Identity();
+  P_.block<3,3>(3,3) += position_variance * M3::Identity();
+  P_ = ((P_ + P_.transpose()) * .5f).eval();
+  R_ = SO3(A * R_.R_);
+  p_ = A * p_ + transform.t_;
+  v_ = A * v_;
+  g_ = A * g_;
+  global_acc_ = A * global_acc_;
+  fw_R_ = SO3(A * fw_R_.R_);
+  fw_p_ = A * fw_p_ + transform.t_;
+  fw_v_ = A * fw_v_;
+  dx_.setZero();
+  // IMU samples/biases are body-frame quantities. All clocks remain unchanged.
+}
 
 void ESKF::BuildNoise(const Options& options) {
   double et = options.gyro_var_;

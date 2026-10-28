@@ -516,6 +516,26 @@ python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
 
 > 已知问题：本仓库把 glim 嵌套在 `src/glim/` 下，而 `lio2glim.py` 按 `src/glim/util/export_factors.cpp` 找源码，闭环那一步会报 `FileNotFoundError`。反向导出本身不受影响（可用 open3d 直接核对点云与位姿）。
 
+## 已有地图上的运动补偿重定位
+
+重定位现在先在局部 S 系运行 SuperLIO，逐帧去畸变并按局部位姿累积，
+再异步执行 FPFH → TEASER++ → GICP。成功后用 `T_W_S * T_S_Ilatest`
+转换最新 KF 状态和协方差，并切换到世界参考地图跟踪；不会回退到旧配准帧。
+GICP 门限为内点 MSE <0.1 m²，累积子图和当前帧覆盖率均 >80%。
+
+```bash
+ros2 launch super_lio_slam relocation.launch.py \
+  sensor_config:=/home/ros/rosws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/vlp32.yaml \
+  map_path:=/absolute/path/to/reference_map.pcd \
+  use_sim_time:=true rviz:=true
+```
+
+将地图示例路径替换为实际 PCD。窗口、先验及配准参数在独立的
+`src/SuperLIO_SLAM/config/relocation.yaml` 中，也可用 `relocation_config` 选择自己的文件。
+启动需要短时实际静止完成 IMU 初始条件，之后支持运动累积；不是完全动态冷启动。
+状态见 `/lio/relocation/status`。详细参数、坐标输出、初值输入与测试命令见
+[运动补偿重定位使用说明](docs/motion_compensated_relocalization_runtime.md)。
+
 ## 故障排查
 
 - `Could not find ... teaserppConfig.cmake`：先在工作区根目录执行 `python3 tools/build_teaserpp.py --jobs 1`，再运行 colcon。若依赖安装在其他位置，传入 `-Dteaserpp_DIR=/实际安装位置/lib/cmake/teaserpp`。

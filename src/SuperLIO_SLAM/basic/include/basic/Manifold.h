@@ -152,7 +152,7 @@ public:
 
   template<typename OtherDerived>
   SE3(const Eigen::MatrixBase<OtherDerived>& rhs)  :
-  T_(rhs)
+  SE3(M4(rhs))
   {}
 
   SE3& operator=(const SE3& rhs);

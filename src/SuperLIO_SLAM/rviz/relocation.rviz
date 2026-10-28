@@ -53,20 +53,20 @@ Visualization Manager:
       Radius: 0.10000000149011612
       Reference Frame: world
       Value: true
-    - Alpha: 0.699999988079071
+    - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
         Max Value: 20.425508499145508
         Min Value: -1.1403765678405762
         Value: true
       Axis: Z
-      Channel Name: z
+      Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: AxisColor
+      Color Transformer: Intensity
       Decay Time: 2000
       Enabled: false
-      Invert Rainbow: true
+      Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 150
       Min Color: 0; 0; 0
@@ -74,7 +74,7 @@ Visualization Manager:
       Name: map
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 1
+      Size (Pixels): 3
       Size (m): 0.009999999776482582
       Style: Points
       Topic:
@@ -96,7 +96,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: AxisColor
+      Color Transformer: Intensity
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -119,7 +119,7 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
-    - Alpha: 0.8999999761581421
+    - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
         Max Value: 10
@@ -129,7 +129,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 245; 255; 245
-      Color Transformer: FlatColor
+      Color Transformer: Intensity
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -140,7 +140,7 @@ Visualization Manager:
       Name: BuildedMap
       Position Transformer: XYZ
       Selectable: true
-      Size (Pixels): 1
+      Size (Pixels): 3
       Size (m): 0.009999999776482582
       Style: Points
       Topic:
