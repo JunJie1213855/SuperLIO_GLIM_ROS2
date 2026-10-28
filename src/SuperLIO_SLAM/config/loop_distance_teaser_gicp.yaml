@@ -1,6 +1,7 @@
 # Optional distance-retrieval UrbanNav trial profile.
 # Default launch still uses loop_teaser_gicp.yaml (coarse RMSE 0.3 m).
 # Select this profile explicitly; no ground-truth accuracy evaluation.
+# Stricter acceptance gates reject sparse/low-overlap matches; full-bag retuning pending.
 # Runtime settings for loop_registration_mode:=std_teaser_gicp.
 # Defaults are experimental; calibrate on each sensor and bag before changing the default mode.
 loop_backend_node:
@@ -27,17 +28,17 @@ loop_backend_node:
     teaser_max_clique_time_limit_s: 0.05
     teaser_max_clique_num_threads: 2
     coarse_residual_threshold_m: 0.6
-    coarse_min_inliers: 6
+    coarse_min_inliers: 30
     coarse_min_inlier_ratio: 0.3
     coarse_max_inlier_rmse_m: 0.4  # RMSE over coarse inliers, not ground-truth pose error
     gicp_max_iterations: 40
     gicp_correspondence_randomness: 20
     gicp_max_correspondence_distance_m: 2.0
     quality_nn_radius_m: 1.0
-    quality_min_source_overlap: 0.35
-    quality_min_current_frame_overlap: 0.35
+    quality_min_source_overlap: 0.7
+    quality_min_current_frame_overlap: 0.7
     quality_min_inlier_count: 100
-    quality_max_inlier_mse_m2: 0.25
+    quality_max_inlier_mse_m2: 0.15
     quality_min_information_ratio: 0.00001
     quality_max_refinement_translation_m: 5.0
     quality_max_refinement_rotation_deg: 20.0
