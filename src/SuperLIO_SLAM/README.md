@@ -69,16 +69,16 @@ ros2 bag play /home/ros/dataset/mid360/jungle_challenge --clock
 
 Restart the launch before replaying the same bag from its beginning; that also clears the pose graph and TF history. Live sensors should retain the default `use_sim_time:=false`.
 
-The Robosense Airy `mapping` bag uses device-uptime stamps (about 11860 s) in LiDAR and IMU messages, while its `/clock` uses the recording epoch. Use the Robosense launch and `--clock` together:
+The Robosense Airy `mapping` bag uses device-uptime stamps (about 11860 s) in LiDAR and IMU messages. Point clouds, odometry and TF now preserve that time base, so neither `--clock` nor `use_sim_time:=true` is required:
 
 ```bash
-ros2 launch super_lio_slam robo_slam.launch.py rviz:=true use_sim_time:=true
-ros2 bag play /home/ros/dataset/robosense/mapping --clock
+ros2 launch super_lio_slam robosense_airy.launch.py rviz:=true
+ros2 bag play /mnt/d/dataset/SLAM/robosense/mapping
 ```
 
 With `lio.output.dense: true`, `/lio/cloud_world_dense` publishes every complete deskewed scan transformed into `world`, independently of `lio.output.map` and `lio.output.pub_step`. `/lio/cloud_world` retains its configurable visualization behavior. These are current scans, not an accumulated map; a Unitree L1 scan in the recorded bag contains about 2100 points. The Robosense backend still uses its separately filtered keyframes. The corrected `/lio_slam/map` is independently downsampled by the backend map settings in `config/slam.yaml`.
 
-`config/robosense_airy.yaml` enables `lio.ros.align_sensor_time_to_ros_clock`. It waits for the simulated ROS clock, then computes one offset for published odometry, clouds, keyframes, and TF; the LIO estimator still uses the original shared device time for LiDAR/IMU synchronization. Other sensor configurations leave this opt-in setting disabled.
+The legacy `lio.ros.align_sensor_time_to_ros_clock` parameter is deprecated and ignored. The backend stamps `map -> world` using the newest front-end odometry data time, including IMU-rate predictions; pauses do not advance its timestamp. Simulation time remains optional. See the [sensor-time playback guide](../../docs/sensor_time_playback.md) for commands and validation.
 
 For a Unitree UniLiDAR L1 publishing `/unilidar/cloud` and `/unilidar/imu`, use:
 
@@ -385,8 +385,7 @@ The default profile remains `loop_teaser_gicp.yaml`. The current trial file uses
 coarse RMSE limit 0.4 m and at least 30 coarse inliers. Both profiles share the
 same strict GICP gates: source/current overlap >0.8 and inlier MSE <0.1 m². The
 coarse settings differ from the default and are not an accuracy guarantee. See the UrbanNav data limitations below.
-For bag playback use `ros2 bag play ... --clock` in another sourced terminal;
-for live sensors use `use_sim_time:=false`.
+Bag playback can use `ros2 bag play ...` without `/clock`. The optional pair `use_sim_time:=true` / `--clock` remains supported; live sensors use the default `use_sim_time:=false`.
 
 Chinese commands and the recording/export sequence are in the
 [workspace README](../../README.md#11-不同回环方式的启动命令).
@@ -399,7 +398,7 @@ The loop backend is launched with the library directories selected by CMake prep
 
 The local bag contains 32-ring `/velodyne_points` at about 10 Hz and `/imu/data` at about 200 Hz. `vlp32.yaml` now selects VELO32 (`lio.sensor.lidar_type: 4`). Sampled PointCloud2 messages contain x/y/z/intensity/ring but **no per-point time field**. The current Velodyne adapter expects float32 `time` in seconds, so successful launch does not establish valid deskewing for this bag. Per-point time reconstruction or a source with recorded point times is required before evaluating mapping quality; LiDAR–IMU extrinsics also need verification.
 
-Use `use_sim_time:=true` with bag playback `--clock`. Selecting only `/velodyne_points /imu/data` avoids unrelated camera traffic and custom Novatel message types. See the [inspection report](../../docs/urbannav_dataset_check.md) for exact findings.
+The default sensor-time mode needs neither `use_sim_time:=true` nor `--clock`; the pair remains optional. Selecting only `/velodyne_points /imu/data` avoids unrelated camera traffic and custom Novatel message types. See the [inspection report](../../docs/urbannav_dataset_check.md) for exact findings.
 
 To hide only the repeated missing Velodyne `time` field warning, set the environment
 variable before starting the front-end (default is enabled):

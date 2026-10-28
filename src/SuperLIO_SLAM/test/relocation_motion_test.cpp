@@ -43,6 +43,8 @@ int main(int argc,char** argv) {
     auto map_path=folder/"reference.pcd";
     pcl::io::savePCDFileBinary(map_path.string(),world);
     std::vector<rclcpp::Parameter> params{
+      // A stopped ROS clock and a legacy alignment flag must not block sensor-time tracking.
+      {"use_sim_time",true}, {"lio.ros.align_sensor_time_to_ros_clock",true},
       {"relocation.map_path",map_path.string()}, {"lio.ros.lidar_topic","/test/relocation/cloud"},
       {"lio.ros.imu_topic","/test/relocation/imu"},{"lio.sensor.lidar_type",4},
       {"lio.sensor.blind",.1},{"lio.sensor.maxrange",60.0},{"lio.sensor.filter_rate",1},

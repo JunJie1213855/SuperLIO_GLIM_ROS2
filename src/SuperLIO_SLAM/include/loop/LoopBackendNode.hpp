@@ -102,6 +102,8 @@ class LoopBackendNode final : public rclcpp::Node {
   void addGraphNode(std::size_t index, const gtsam::Pose3 &raw_pose);
   void publishCurrent(std::size_t index, bool loop_accepted);
   void publishMapToWorld();
+  void rememberDataStamp(const builtin_interfaces::msg::Time& stamp);
+  void onFrontendOdometry(const nav_msgs::msg::Odometry::SharedPtr msg);
   void publishPath(const builtin_interfaces::msg::Time &stamp);
   void publishMap(const MapSnapshot& snapshot);
   void publishLoopMarkers(const builtin_interfaces::msg::Time &stamp);
@@ -132,8 +134,14 @@ class LoopBackendNode final : public rclcpp::Node {
   gtsam::Pose3 map_from_world_;
   mutable std::mutex map_tf_mutex_;
   bool have_map_transform_ = false;
+  bool map_tf_dirty_ = false;
+  std::optional<builtin_interfaces::msg::Time> latest_data_stamp_;
+  std::optional<builtin_interfaces::msg::Time> published_map_tf_stamp_;
+  rclcpp::Clock diagnostics_clock_{RCL_STEADY_TIME};
 
   rclcpp::Subscription<super_lio_slam::msg::KeyFrame>::SharedPtr keyframe_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr frontend_odom_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr frontend_imu_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;

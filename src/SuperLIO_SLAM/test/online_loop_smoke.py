@@ -6,6 +6,7 @@ real scene; the default scene is deterministic and generated in memory.
 """
 import argparse
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -68,6 +69,7 @@ def main():
     parser.add_argument('--coarse-max-rmse', type=float, default=0.3)
     parser.add_argument('--loop-min-time-separation', type=float, default=0.0, help='Test override; runtime default is 30 s')
     parser.add_argument('--timestamp-step', type=float, default=0.0, help='Synthetic sensor seconds per frame; zero uses node time')
+    parser.add_argument('--sensor-stamp-base', type=float, help='Sensor epoch independent of the node clock; requires a positive timestamp step')
     parser.add_argument('--reject-time-window', action='store_true')
     args = parser.parse_args()
     expect_rejection = args.reject_registration or args.reject_time_window or args.reject_distance
@@ -108,7 +110,9 @@ def main():
         while publisher.get_subscription_count() == 0 and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)
         assert publisher.get_subscription_count(), 'Backend subscription unavailable'
-        base_stamp = node.get_clock().now().nanoseconds
+        if args.sensor_stamp_base is not None:
+            assert args.timestamp_step > 0, 'Sensor-epoch test requires increasing timestamps'
+        base_stamp = round(args.sensor_stamp_base*1e9) if args.sensor_stamp_base is not None else node.get_clock().now().nanoseconds
         for index in range(5):
             msg = KeyFrame()
             msg.header.stamp = (Time(nanoseconds=base_stamp+round(index*args.timestamp_step*1e9)).to_msg()
@@ -166,7 +170,11 @@ def main():
         while not expect_rejection and time.monotonic() < deadline:
             if received:
                 position=received[-1].pose.pose.position
-                if np.linalg.norm(np.array([position.x,position.y,position.z])-true_translation)<0.5:
+                q=received[-1].pose.pose.orientation
+                measured_yaw=np.arctan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z))
+                angle_error=np.arctan2(np.sin(measured_yaw-true_yaw),np.cos(measured_yaw-true_yaw))
+                if (np.linalg.norm(np.array([position.x,position.y,position.z])-true_translation)<0.5
+                        and (not args.moving or abs(angle_error)<0.06)):
                     break
             rclpy.spin_once(node,timeout_sec=0.05)
         deadline = time.monotonic() + 0.8
@@ -175,18 +183,36 @@ def main():
         assert paths and len(paths[-1].poses) == 5, 'Incomplete optimized history'
         assert maps and maps[-1].header.frame_id == 'map' and maps[-1].width > 0, 'Missing rebuilt map'
         assert transforms, 'Missing map -> world correction'
+        if args.sensor_stamp_base is not None:
+            assert all(base_stamp <= t.header.stamp.sec*1000000000+t.header.stamp.nanosec <= base_stamp+round(4*args.timestamp_step*1e9) for t in transforms), 'Map correction TF used a non-sensor epoch'
+            assert transforms[-1].header.stamp == received[-1].header.stamp, 'Delayed correction did not use latest keyframe time'
         has_loop = bool(loops and any(m.points for a in loops for m in a.markers))
         pose = received[-1].pose.pose
         corrected = float(np.linalg.norm(np.array([pose.position.x, pose.position.y, pose.position.z]) - true_translation))
         def yaw(q):
             return np.arctan2(2*(q.w*q.z + q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
-        expected_tf_yaw = yaw(pose.orientation) - raw_yaw
-        tf = transforms[-1].transform
-        ctf, stf = np.cos(expected_tf_yaw), np.sin(expected_tf_yaw)
-        expected_tf_rotation = np.array([[ctf,-stf,0],[stf,ctf,0],[0,0,1]])
-        # Procedural scene is planar in attitude; tolerate tiny GICP roll/pitch.
-        expected_tf_translation = np.array([pose.position.x,pose.position.y,pose.position.z]) - expected_tf_rotation @ raw_positions[-1]
-        assert np.linalg.norm(np.array([tf.translation.x,tf.translation.y,tf.translation.z])-expected_tf_translation) < 0.03, 'TF correction direction or timestamp mismatch'
+        def rotation(q):
+            x,y,z,w=np.array([q.x,q.y,q.z,q.w])/np.linalg.norm([q.x,q.y,q.z,q.w])
+            return np.array([[1-2*(y*y+z*z),2*(x*y-z*w),2*(x*z+y*w)],
+                             [2*(x*y+z*w),1-2*(x*x+z*z),2*(y*z-x*w)],
+                             [2*(x*z-y*w),2*(y*z+x*w),1-2*(x*x+y*y)]])
+        cr,sr=np.cos(raw_yaw),np.sin(raw_yaw)
+        raw_rotation=np.array([[cr,-sr,0],[sr,cr,0],[0,0,1]])
+        def correction_matches_latest_pose():
+            current_pose=received[-1].pose.pose
+            expected_rotation=rotation(current_pose.orientation) @ raw_rotation.T
+            expected_translation=np.array([current_pose.position.x,current_pose.position.y,current_pose.position.z])-expected_rotation @ raw_positions[-1]
+            current_tf=transforms[-1].transform
+            actual_translation=np.array([current_tf.translation.x,current_tf.translation.y,current_tf.translation.z])
+            return (np.linalg.norm(actual_translation-expected_translation)<1e-5 and
+                    np.linalg.norm(rotation(current_tf.rotation)-expected_rotation)<1e-5)
+        # Odometry and TF are separate topics; wait for the same asynchronous graph revision.
+        deadline=time.monotonic()+2
+        while not correction_matches_latest_pose() and time.monotonic()<deadline:
+            rclpy.spin_once(node,timeout_sec=.02)
+        assert correction_matches_latest_pose(), 'TF correction direction or timestamp mismatch'
+        pose=received[-1].pose.pose
+        corrected=float(np.linalg.norm(np.array([pose.position.x,pose.position.y,pose.position.z])-true_translation))
         last_path = paths[-1].poses[-1].pose.position
         assert np.linalg.norm(np.array([last_path.x,last_path.y,last_path.z])-np.array([pose.position.x,pose.position.y,pose.position.z])) < 1e-5, 'Path and graph odometry disagree'
         if expect_rejection:
@@ -200,11 +226,12 @@ def main():
             assert np.linalg.norm(np.array([history.x,history.y,history.z])-raw_positions[1]) > 0.02, 'Loop did not update historical poses'
             assert corrected < 0.5, f'PGO did not reduce artificial 1 m drift: {corrected}'
             if args.moving:
-                estimated_yaw = 2 * np.arctan2(pose.orientation.z, pose.orientation.w)
-                assert abs(estimated_yaw - true_yaw) < 0.06, 'Incorrect loop rotation direction'
+                estimated_yaw = yaw(pose.orientation)
+                yaw_error = np.arctan2(np.sin(estimated_yaw-true_yaw), np.cos(estimated_yaw-true_yaw))
+                assert abs(yaw_error) < 0.06, f'Incorrect loop rotation direction: estimated={estimated_yaw:.6f}, true={true_yaw:.6f}, error={yaw_error:.6f}'
             print(f'PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> {corrected:.4f} m corrected')
         log.flush()
-        diagnostic_log = Path(log.name).read_text()
+        diagnostic_log = re.sub(r'\x1b\[[0-9;]*m', '', Path(log.name).read_text())
         assert 'Loop search input=' not in diagnostic_log, 'Verbose search summary leaked into INFO'
         assert 'hash_candidates=' not in diagnostic_log, 'Verbose candidate counts leaked into INFO'
         if args.reject_time_window or args.reject_distance:

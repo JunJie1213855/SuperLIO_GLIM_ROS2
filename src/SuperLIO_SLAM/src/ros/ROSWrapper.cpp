@@ -286,9 +286,11 @@ ROSWrapper::ROSWrapper(const rclcpp::NodeOptions& options)
 : rclcpp::Node("super_lio", options)
 {
   LoadParamFromRos(*this);
-  align_sensor_time_to_ros_clock_ = declare_parameter<bool>(
-      "lio.ros.align_sensor_time_to_ros_clock", false);
-  get_parameter("use_sim_time", use_sim_time_);
+  // Accept old YAMLs without deriving a sensor epoch from callback arrival time.
+  if (declare_parameter<bool>("lio.ros.align_sensor_time_to_ros_clock", false)) {
+    RCLCPP_WARN(get_logger(),
+        "lio.ros.align_sensor_time_to_ros_clock is deprecated and ignored; preserving sensor timestamps");
+  }
   LOG(INFO) << GREEN << " ---> Using Lidar type: "
             << lidarTypeToString(g_lidar_type) << RESET;
 
@@ -298,24 +300,12 @@ ROSWrapper::ROSWrapper(const rclcpp::NodeOptions& options)
   setupIO();
 }
 
-bool ROSWrapper::initializeOutputTime(double sensor_time) {
-  if (!align_sensor_time_to_ros_clock_ || output_time_initialized_) return true;
-  if (use_sim_time_ && !get_clock()->ros_time_is_active()) return false;
-  const double ros_time = now().seconds();
-  // A simulated ROS clock is zero until the bag starts publishing /clock.
-  if (!std::isfinite(sensor_time) || !std::isfinite(ros_time) || ros_time < 1.0) {
-    return false;
-  }
-  const double difference = ros_time - sensor_time;
-  output_time_offset_sec_ = std::abs(difference) > 10.0 ? difference : 0.0;
-  output_time_initialized_ = true;
-  RCLCPP_INFO(get_logger(), "Sensor-to-ROS output time offset: %.6f s",
-              output_time_offset_sec_);
-  return true;
+bool ROSWrapper::validSensorTime(double sensor_time) const {
+  return std::isfinite(sensor_time) && sensor_time >= 0.0;
 }
 
 builtin_interfaces::msg::Time ROSWrapper::outputStamp(double sensor_time) const {
-  return toRosTime(sensor_time + output_time_offset_sec_);
+  return toRosTime(sensor_time);
 }
 
 
@@ -388,7 +378,7 @@ void ROSWrapper::setupIO(){
 void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
   IMUData data;
   data.secs = stampToSec(msg->header.stamp);
-  if (!initializeOutputTime(data.secs)) return;
+  if (!validSensorTime(data.secs)) return;
   data.acc  = V3(msg->linear_acceleration.x,
                  msg->linear_acceleration.y,
                  msg->linear_acceleration.z);
@@ -460,7 +450,7 @@ void ROSWrapper::imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg){
 
 void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg){
   if(msg->point_num < 10) return;
-  if (!initializeOutputTime(stampToSec(msg->header.stamp))) return;
+  if (!validSensorTime(stampToSec(msg->header.stamp))) return;
   LidarData lidar_data;
   std::size_t ptsize = msg->point_num;
   lidar_data.pc.reset(new pcl::PointCloud<LI2Sup::PointXTZIT>());
@@ -488,7 +478,7 @@ void ROSWrapper::livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 */
 void ROSWrapper::stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg){
   if(msg->data.size() < 10) return;
-  if (!initializeOutputTime(stampToSec(msg->header.stamp))) return;
+  if (!validSensorTime(stampToSec(msg->header.stamp))) return;
   
   LidarData lidar_data;
   lidar_data.pc.reset(new pcl::PointCloud<LI2Sup::PointXTZIT>());
@@ -918,7 +908,8 @@ void ROSWrapper::set_global_map(const BASIC::CloudPtr& global_map){
         if (publish_interval > 10) {
           publish_interval = 10;
         }
-        global_map_msg_.header.stamp = this->now();
+        // The immutable reference map has no acquisition time. Zero requests latest TF.
+        global_map_msg_.header.stamp = builtin_interfaces::msg::Time{};
         global_map_pub->publish(global_map_msg_);
       });
 }
@@ -941,7 +932,7 @@ void ROSWrapper::commitRelocationFrame(const BASIC::SE3& world_from_local) {
 }
 
 double ROSWrapper::sensorTime(const builtin_interfaces::msg::Time& stamp) const {
-  return stampToSec(stamp)-output_time_offset_sec_;
+  return stampToSec(stamp);
 }
 
 void ROSWrapper::setRelocationInitialPoseCallback(

@@ -30,7 +30,7 @@ ros2 launch super_lio_slam relocation.launch.py \
   use_sim_time:=true rviz:=true
 ```
 
-在另一个已加载 ROS 环境的终端回放对应 bag，并使用 `--clock`。
+在另一个已加载 ROS 环境的终端回放对应 bag。以上示例启用了仿真时间，需配套 `--clock`；默认可省略示例中的 `use_sim_time:=true` 和播放器的 `--clock`，使用原始传感器时间。详见 [时间策略更新](sensor_time_playback.md)。
 实时传感器使用 `use_sim_time:=false`。
 
 `relocation_config` 默认加载包内 `config/relocation.yaml`，与传感器参数分开。
@@ -88,7 +88,7 @@ ros2 launch super_lio_slam relocation.launch.py \
 运行中可在 RViz 向 `/initialpose` 发布世界系先验：
 
 - frame_id 必须为 `world`（空值按 world 处理），使用消息中的实际 z，不再固定为 0.2 m。
-- 非零时间戳必须与局部滑窗中的关键帧在 0.25 s 内匹配；已对设备时钟输出偏移作反向转换。
+- 非零时间戳必须与局部滑窗中的关键帧在 0.25 s 内匹配；使用原始传感器时间，不再施加设备到 ROS 时钟的偏移。
 - 时间戳为零时关联当前局部状态。
 - 新先验会增加任务代号，使已运行的旧先验结果失效；不会重置局部 LIO。
 - 当前版本为启动重定位，成功后如需重新定位/更换地图，重启节点开始新会话。

@@ -215,6 +215,18 @@ namespace super_lio_slam
           publishMapToWorld();
         },
         tf_callback_group_);
+    // Track data time independently of /clock, including IMU-rate pose displays.
+    rclcpp::SubscriptionOptions time_options;
+    time_options.callback_group = tf_callback_group_;
+    const auto time_qos = rclcpp::QoS(rclcpp::KeepLast(100)).best_effort();
+    frontend_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        "/lio/odom", time_qos,
+        std::bind(&LoopBackendNode::onFrontendOdometry, this, std::placeholders::_1),
+        time_options);
+    frontend_imu_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        "/lio/imu/odom", time_qos,
+        std::bind(&LoopBackendNode::onFrontendOdometry, this, std::placeholders::_1),
+        time_options);
     // 关键帧订阅
     keyframe_sub_ = create_subscription<super_lio_slam::msg::KeyFrame>(
         "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
@@ -459,6 +471,7 @@ namespace super_lio_slam
       std::lock_guard<std::mutex> lock(map_tf_mutex_);
       map_from_world_ = frames_[index].map_pose.compose(raw_pose.inverse());
       have_map_transform_ = true;
+      map_tf_dirty_ = true;
     }
   }
 
@@ -744,11 +757,16 @@ namespace super_lio_slam
     const double total_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - processing_begin)
                                 .count();
-    const double stamp_age = (now().seconds() - rclcpp::Time(msg->header.stamp).seconds());
-    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+    double sensor_lag = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(map_tf_mutex_);
+      if (latest_data_stamp_)
+        sensor_lag = (rclcpp::Time(*latest_data_stamp_) - rclcpp::Time(msg->header.stamp)).seconds();
+    }
+    RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
                          "Backend timing input=%u frames=%zu filter=%.1f ms descriptor=%.1f ms search_verify_insert=%.1f ms "
-                         "ingest=%.1f ms stamp_age=%.3f s registration_pending=%zu dropped_tasks=%zu",
-                         msg->id, index + 1, filter_ms, descriptor_ms, std_ms - descriptor_ms, total_ms, stamp_age, queued, dropped);
+                         "ingest=%.1f ms sensor_lag=%.3f s registration_pending=%zu dropped_tasks=%zu",
+                         msg->id, index + 1, filter_ms, descriptor_ms, std_ms - descriptor_ms, total_ms, sensor_lag, queued, dropped);
   }
 
   void LoopBackendNode::publishCurrent(std::size_t index, bool loop_accepted)
@@ -761,7 +779,8 @@ namespace super_lio_slam
     odom.pose.pose = poseToMsg(frame.map_pose);
     odom_pub_->publish(odom);
 
-    // The live correction uses the node clock, never a delayed keyframe stamp.
+    // Keyframe-only clients still work; live frontend stamps take precedence over delayed work.
+    rememberDataStamp(frame.stamp);
     publishMapToWorld();
 
     publishPath(frame.stamp);
@@ -773,14 +792,31 @@ namespace super_lio_slam
       publishLoopMarkers(frame.stamp);
   }
 
+  void LoopBackendNode::rememberDataStamp(const builtin_interfaces::msg::Time &stamp)
+  {
+    if (stamp.sec < 0 || stamp.nanosec >= 1000000000u)
+      return;
+    std::lock_guard<std::mutex> lock(map_tf_mutex_);
+    if (!latest_data_stamp_ || rclcpp::Time(stamp) > rclcpp::Time(*latest_data_stamp_))
+      latest_data_stamp_ = stamp;
+  }
+
+  void LoopBackendNode::onFrontendOdometry(const nav_msgs::msg::Odometry::SharedPtr msg)
+  {
+    if (msg->header.frame_id == "world")
+      rememberDataStamp(msg->header.stamp);
+  }
+
   void LoopBackendNode::publishMapToWorld()
   {
     std::lock_guard<std::mutex> lock(map_tf_mutex_);
-    if (!have_map_transform_)
+    if (!have_map_transform_ || !latest_data_stamp_)
+      return;
+    if (published_map_tf_stamp_ && *published_map_tf_stamp_ == *latest_data_stamp_ && !map_tf_dirty_)
       return;
     const auto map_from_world = map_from_world_;
     geometry_msgs::msg::TransformStamped tf;
-    tf.header.stamp = now();
+    tf.header.stamp = *latest_data_stamp_;
     tf.header.frame_id = "map";
     tf.child_frame_id = "world";
     const auto transform = poseToMsg(map_from_world);
@@ -789,6 +825,8 @@ namespace super_lio_slam
     tf.transform.translation.z = transform.position.z;
     tf.transform.rotation = transform.orientation;
     tf_broadcaster_->sendTransform(tf);
+    published_map_tf_stamp_ = tf.header.stamp;
+    map_tf_dirty_ = false;
   }
 
   void LoopBackendNode::publishPath(const builtin_interfaces::msg::Time &stamp)
@@ -966,7 +1004,7 @@ namespace super_lio_slam
       {
         registration_tasks_.pop_front();
         ++registration_tasks_dropped_;
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+        RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
                              "Registration queue full: capacity=%zu dropped_tasks=%zu (keyframes retained)",
                              registration_queue_capacity_, registration_tasks_dropped_);
       }
@@ -1056,7 +1094,7 @@ namespace super_lio_slam
       {
         RCLCPP_ERROR(get_logger(), "Registration task %zu failed: %s", task.index, error.what());
       }
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+      RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
                            "Registration timing frame=%zu queue_wait=%.1f ms work=%.1f ms",
                            task.index, queue_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
     }
@@ -1123,6 +1161,7 @@ namespace super_lio_slam
       std::lock_guard<std::mutex> lock(map_tf_mutex_);
       map_from_world_ = frames_[latest].map_pose.compose(frames_[latest].odom_pose.inverse());
       have_map_transform_ = true;
+      map_tf_dirty_ = true;
     }
     publishCurrent(latest, true);
     RCLCPP_INFO(get_logger(), "Loop %zu -> %zu %s: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
@@ -1165,7 +1204,7 @@ namespace super_lio_slam
       try
       {
         publishMap(snapshot);
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 5000,
+        RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
                              "Map timing frames=%zu queue_wait=%.1f ms rebuild=%.1f ms", snapshot.frames.size(),
                              std::chrono::duration<double, std::milli>(begin - snapshot.enqueued).count(),
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());

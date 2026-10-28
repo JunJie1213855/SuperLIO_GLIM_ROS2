@@ -100,7 +100,7 @@ private:
   void imuHandler(const sensor_msgs::msg::Imu::SharedPtr msg);
   void livoxHandler(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
   void stdMsgHandler(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
-  bool initializeOutputTime(double sensor_time);
+  bool validSensorTime(double sensor_time) const;
   builtin_interfaces::msg::Time outputStamp(double sensor_time) const;
 
   void setupParams();
@@ -117,10 +117,6 @@ private:
   bool lidar_pushed_ = false;
   double last_timestamp_imu_ = -1.0;
   double last_timestamp_lidar_ = -1.0;
-  bool align_sensor_time_to_ros_clock_ = false;
-  bool use_sim_time_ = false;
-  bool output_time_initialized_ = false;
-  double output_time_offset_sec_ = 0.0;
 
   ESKF::Ptr eskf_{nullptr};
 

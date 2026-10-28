@@ -20,6 +20,10 @@
       └── fix_dump_boost19.py
 ```
 
+## 无 /clock 回放
+
+点云、位姿与 TF 现在统一使用传感器数据时间，默认不需要 `use_sim_time:=true` 或播放器 `--clock`。旧时间对齐参数已弃用；具体命令与验证见[传感器时间回放说明](docs/sensor_time_playback.md)。
+
 ## 室内 / 室外回环配置
 
 `vlp32.launch.py` 默认使用 `loop_outdoor_teaser_gicp.yaml`，`unitree_slam.launch.py` 默认使用 `loop_indoor_teaser_gicp.yaml`。两套参数、完整回放中位数、逐候选数据和验证范围见[室内/室外回环统计报告](docs/loop_parameter_calibration.md)。

@@ -9,8 +9,8 @@
 
     lio.ros.lidar_topic: "/rslidar_points"
     lio.ros.imu_topic: "/rslidar_imu_data"
-    # The Robosense bag uses device-uptime stamps; map published output to /clock.
-    lio.ros.align_sensor_time_to_ros_clock: true
+    # Preserve device time on point clouds, odometry and TF; /clock is optional.
+    lio.ros.align_sensor_time_to_ros_clock: false
 
     lio.sensor.lidar_type: 8
     lio.sensor.scan_line: 96
