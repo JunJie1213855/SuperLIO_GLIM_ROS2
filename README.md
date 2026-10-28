@@ -37,7 +37,7 @@ git submodule update --init --recursive
 python3 tools/build_teaserpp.py --jobs 1
 export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-}
 
-MAKEFLAGS=-j1 colcon build --symlink-install --executor sequential \
+MAKEFLAGS=-j4 colcon build --symlink-install --executor sequential \
   --cmake-args -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM \
   -DGTSAM_UNSTABLE_DIR=/usr/local/lib/cmake/GTSAM_UNSTABLE \
   -DSUPERLIO_WITH_TEASER=ON -DBUILD_TESTING=ON

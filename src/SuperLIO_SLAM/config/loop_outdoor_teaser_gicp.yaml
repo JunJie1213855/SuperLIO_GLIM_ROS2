@@ -5,6 +5,7 @@
 # Other geometry, refinement and minimum-inlier gates remain enabled.
 loop_backend_node:
   ros__parameters:
+    # teaser coarse 阈值
     coarse_max_inlier_rmse_m: 0.4
     coarse_min_inlier_ratio: 0.15
     coarse_min_inliers: 10
@@ -12,14 +13,17 @@ loop_backend_node:
     correspondence_max_unique: 200
     correspondence_min_baseline_m: 2.0
     correspondence_min_unique: 6
+    # fpfh 阈值
     fpfh_distance_ratio_threshold: 0.9
     fpfh_feature_radius_m: 2.5
     fpfh_normal_radius_m: 1.0
     fpfh_pose_hint_radius_m: 3.0
+    # gicp 阈值
     gicp_correspondence_randomness: 20
     gicp_max_correspondence_distance_m: 2.0
     gicp_max_iterations: 40
-    quality_max_inlier_mse_m2: 0.1
+    # gicp 质量
+    quality_max_inlier_mse_m2: 0.15
     quality_max_refinement_rotation_deg: 20.0
     quality_max_refinement_translation_m: 5.0
     quality_min_current_frame_overlap: 0.9
@@ -27,6 +31,7 @@ loop_backend_node:
     quality_min_inlier_count: 100
     quality_min_source_overlap: 0.9
     quality_nn_radius_m: 1.0
+    # 配准相关信息限制
     registration_max_source_points: 10000
     registration_max_target_points: 50000
     registration_min_points: 100
@@ -35,7 +40,9 @@ loop_backend_node:
     registration_submap_max_keyframes: 4
     registration_submap_max_travel_distance_m: 6.0
     registration_voxel_size_m: 0.5
+    # std 描述子 top 可选
     std_registration_top_k: 3
+    # teaser 相关信息
     teaser_estimate_scaling: false
     teaser_max_clique_num_threads: 2
     teaser_max_clique_time_limit_s: 0.05

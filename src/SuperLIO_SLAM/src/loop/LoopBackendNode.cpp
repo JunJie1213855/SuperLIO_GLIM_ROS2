@@ -70,7 +70,7 @@ namespace super_lio_slam
       throw std::invalid_argument("std_teaser_gicp requires a build with SUPERLIO_WITH_TEASER=ON");
 #endif
 
-    // 是否大于 0 
+    // 是否大于 0
     auto positive = [this](const char *name, double value)
     {
       const double result = declare_parameter<double>(name, value);
@@ -78,7 +78,7 @@ namespace super_lio_slam
         throw std::invalid_argument(std::string(name) + " must be finite and positive");
       return result;
     };
-    // 是否在区间内 
+    // 是否在区间内
     auto bounded = [this](const char *name, int value, int low, int high)
     {
       const int result = declare_parameter<int>(name, value);
@@ -1073,8 +1073,8 @@ namespace super_lio_slam
             }
             const auto target = downsample(merged, registration_settings_.voxel, registration_settings_.max_target);
             observation = verifyWithGicp(task.current_cloud, target, task.index,
-                                        candidate.historical_index, candidate.proposal,
-                                        candidate.odom_hint ? &*candidate.odom_hint : nullptr);
+                                         candidate.historical_index, candidate.proposal,
+                                         candidate.odom_hint ? &*candidate.odom_hint : nullptr);
           }
           if (observation && !stopping_)
           {
