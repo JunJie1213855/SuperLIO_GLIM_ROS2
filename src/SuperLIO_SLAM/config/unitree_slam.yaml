@@ -34,25 +34,17 @@ loop_backend_node:
     dis_threshold: 0.5
     icp_threshold: 0.4
 
-    # ICP turns a candidate into a measured relative pose only if it passes gates.
+    # Shared GICP registration and quality settings are in loop_teaser_gicp.yaml.
+    # Direct GICP aligns one current frame to a historical local submap.
     keyframe_cloud_voxel_size: 0.2
     keyframe_cloud_max_points: 30000
-    icp_voxel_size: 0.5
-    icp_max_correspondence_distance: 2.0
-    icp_max_iterations: 40
-    icp_fitness_threshold: 0.8
-    icp_min_overlap_ratio: 0.35
-    icp_max_translation_correction: 5.0
-    icp_max_rotation_correction_deg: 20.0
-    icp_submap_half_width: 5
-    icp_min_points: 100
-    icp_max_source_points: 10000
-    icp_max_target_points: 50000
+    gicp_submap_half_width: 5
 
     # iSAM2 graph, corrected map, and repeated-loop suppression.
     loop_min_interval: 20
-    loop_candidate_mode: distance
-    loop_candidate_radius_m: 15.0
+    loop_candidate_mode: std
+    loop_registration_mode: std_teaser_gicp
+    loop_candidate_radius_m: 15.0  # spatial gate for STD and distance retrieval
     loop_min_time_separation_s: 30.0  # candidate stamp gap must be strictly greater
     loop_diagnostic_stride: 1  # 0 disables per-keyframe STD summaries
     graph_prior_translation_sigma: 0.001

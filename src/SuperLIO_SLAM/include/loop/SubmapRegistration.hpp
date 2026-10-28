@@ -61,10 +61,10 @@ struct RegistrationSettings {
   int covariance_neighbors = 20;
   double correspondence_distance = 2.0;
   double quality_radius = 1.0;
-  double min_overlap = 0.35;
-  double min_current_overlap = 0.35;
+  double min_overlap = 0.8; // strict lower bound
+  double min_current_overlap = 0.8; // strict lower bound
   int min_inliers = 100;
-  double max_mse = 0.25;
+  double max_mse = 0.1; // strict upper bound, m^2
   double min_information_ratio = 1e-5;
   double max_translation = 5.0;
   double max_rotation_deg = 20.0;

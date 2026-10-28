@@ -30,6 +30,7 @@ RegistrationResult refineRegister(const RegistrationCloud::ConstPtr& source,
     out.fine_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
     return out;
   };
+  if (!validRigidTransform(out.transform)) return finish("invalid_initial_transform");
   if (!source || !target || !current || current->empty() ||
       source->size()<static_cast<std::size_t>(s.min_points) || target->size()<static_cast<std::size_t>(s.min_points) ||
       std::min(source->size(),target->size())<=static_cast<std::size_t>(s.covariance_neighbors))
@@ -64,9 +65,9 @@ RegistrationResult refineRegister(const RegistrationCloud::ConstPtr& source,
   pcl::transformPointCloud(*current,current_aligned,out.transform.cast<float>().eval());
   double current_mse=0;
   out.current_overlap=static_cast<double>(quality(current_aligned,current_mse))/current_aligned.size();
-  if (out.inliers<static_cast<std::size_t>(s.min_inliers) || out.overlap<s.min_overlap || out.current_overlap<s.min_current_overlap)
+  if (out.inliers<static_cast<std::size_t>(s.min_inliers) || out.overlap<=s.min_overlap || out.current_overlap<=s.min_current_overlap)
     return finish("low_overlap");
-  if (!std::isfinite(out.mse) || out.mse>s.max_mse) return finish("high_inlier_mse");
+  if (!std::isfinite(out.mse) || out.mse>=s.max_mse) return finish("high_inlier_mse");
   // Conservative geometry diagnostic, not a calibrated GICP covariance.
   // Point-to-plane information is normalized by source extent to balance units.
   Eigen::Vector4f centroid;

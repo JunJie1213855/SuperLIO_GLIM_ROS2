@@ -2,7 +2,7 @@
 <package format="3">
   <name>super_lio_slam</name>
   <version>2.0.0</version>
-  <description>Super-LIO with STD retrieval, optional multi-frame TEASER++/GICP registration, and iSAM2 optimization.</description>
+  <description>Super-LIO with distance/STD retrieval, GICP refinement, optional multi-frame TEASER++ coarse registration, and iSAM2 optimization.</description>
   <maintainer email="lswang@mail.ecust.edu.cn">LS.Wang</maintainer>
   <license>GPLv3</license>
 

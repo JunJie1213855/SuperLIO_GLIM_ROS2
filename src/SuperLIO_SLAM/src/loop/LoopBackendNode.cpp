@@ -17,9 +17,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <pcl/common/transforms.h>
-#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/registration/icp.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <visualization_msgs/msg/marker.hpp>
 
@@ -34,8 +32,6 @@ namespace super_lio_slam
       sigma << rotation, rotation, rotation, translation, translation, translation;
       return sigma;
     }
-
-    double degrees(double radians) { return radians * 180.0 / M_PI; }
 
     gtsam::ISAM2Params onlineGraphParameters()
     {
@@ -56,13 +52,13 @@ namespace super_lio_slam
     read_parameters(*this, std_manager_.config_setting_);
 
     // 闭环检测候选方法选择：std 和 distance
-    candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "distance");
+    candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "std");
     // 两个选项
     if (candidate_mode_ != "distance" && candidate_mode_ != "std")
       throw std::invalid_argument("loop_candidate_mode must be distance or std");
-    registration_mode_ = declare_parameter<std::string>("loop_registration_mode", "std_icp");
-    if (registration_mode_ != "std_icp" && registration_mode_ != "std_teaser_gicp")
-      throw std::invalid_argument("loop_registration_mode must be std_icp or std_teaser_gicp");
+    registration_mode_ = declare_parameter<std::string>("loop_registration_mode", "std_teaser_gicp");
+    if (registration_mode_ != "std_gicp" && registration_mode_ != "std_teaser_gicp")
+      throw std::invalid_argument("loop_registration_mode must be std_gicp or std_teaser_gicp");
 #ifndef SUPERLIO_WITH_TEASER
     if (registration_mode_ == "std_teaser_gicp")
       throw std::invalid_argument("std_teaser_gicp requires a build with SUPERLIO_WITH_TEASER=ON");
@@ -128,35 +124,21 @@ namespace super_lio_slam
     settings.covariance_neighbors = bounded("gicp_correspondence_randomness", 20, 4, 100);
     settings.correspondence_distance = positive("gicp_max_correspondence_distance_m", 2.0);
     settings.quality_radius = positive("quality_nn_radius_m", 1.0);
-    settings.min_overlap = positive("quality_min_source_overlap", 0.35);
-    settings.min_current_overlap = positive("quality_min_current_frame_overlap", 0.35);
+    settings.min_overlap = positive("quality_min_source_overlap", 0.8);
+    settings.min_current_overlap = positive("quality_min_current_frame_overlap", 0.8);
     settings.min_inliers = bounded("quality_min_inlier_count", 100, 3, 100000);
-    settings.max_mse = positive("quality_max_inlier_mse_m2", 0.25);
+    settings.max_mse = positive("quality_max_inlier_mse_m2", 0.1);
     settings.min_information_ratio = positive("quality_min_information_ratio", 1e-5);
     settings.max_translation = positive("quality_max_refinement_translation_m", 5.0);
     settings.max_rotation_deg = positive("quality_max_refinement_rotation_deg", 20.0);
-    if (settings.coarse_min_ratio > 1 || settings.min_overlap > 1 || settings.min_current_overlap > 1)
-      throw std::invalid_argument("overlap/inlier ratios must be <= 1");
+    if (settings.coarse_min_ratio > 1 || settings.min_overlap >= 1 || settings.min_current_overlap >= 1)
+      throw std::invalid_argument("coarse inlier ratio must be <= 1; strict GICP overlap bounds must be < 1");
 
     // 普通参数声明
     keyframe_cloud_voxel_size_ = declare_parameter<double>("keyframe_cloud_voxel_size", 0.25);
     keyframe_cloud_max_points_ = declare_parameter<int>("keyframe_cloud_max_points", 30000);
 
-    // icp 相关参数
-    icp_voxel_size_ = declare_parameter<double>("icp_voxel_size", 0.5);
-    icp_max_correspondence_distance_ =
-        declare_parameter<double>("icp_max_correspondence_distance", 2.0);
-    icp_max_iterations_ = declare_parameter<int>("icp_max_iterations", 50);
-    icp_fitness_threshold_ = declare_parameter<double>("icp_fitness_threshold", 0.8);
-    icp_min_overlap_ratio_ = declare_parameter<double>("icp_min_overlap_ratio", 0.35);
-    icp_max_translation_correction_ =
-        declare_parameter<double>("icp_max_translation_correction", 5.0);
-    icp_max_rotation_correction_deg_ =
-        declare_parameter<double>("icp_max_rotation_correction_deg", 20.0);
-    icp_submap_half_width_ = declare_parameter<int>("icp_submap_half_width", 5);
-    icp_min_points_ = declare_parameter<int>("icp_min_points", 100);
-    icp_max_source_points_ = declare_parameter<int>("icp_max_source_points", 10000);
-    icp_max_target_points_ = declare_parameter<int>("icp_max_target_points", 50000);
+    gicp_submap_half_width_ = bounded("gicp_submap_half_width", 5, 0, 100);
 
     // 回环的部分判决条件
     loop_min_interval_ = declare_parameter<int>("loop_min_interval", 20);
@@ -195,37 +177,6 @@ namespace super_lio_slam
 
     // 关键帧挑选
     keyframe_cloud_max_points_ = std::max(100, keyframe_cloud_max_points_);
-    if (!std::isfinite(icp_voxel_size_) || icp_voxel_size_ < 0.01)
-    {
-      icp_voxel_size_ = 0.5;
-    }
-    if (!std::isfinite(icp_max_correspondence_distance_) ||
-        icp_max_correspondence_distance_ <= 0.0)
-    {
-      icp_max_correspondence_distance_ = 2.0;
-    }
-    if (!std::isfinite(icp_fitness_threshold_) || icp_fitness_threshold_ <= 0.0)
-    {
-      icp_fitness_threshold_ = 0.8;
-    }
-    icp_min_overlap_ratio_ = std::isfinite(icp_min_overlap_ratio_)
-                                 ? std::clamp(icp_min_overlap_ratio_, 0.0, 1.0)
-                                 : 0.35;
-    if (!std::isfinite(icp_max_translation_correction_) ||
-        icp_max_translation_correction_ <= 0.0)
-    {
-      icp_max_translation_correction_ = 5.0;
-    }
-    if (!std::isfinite(icp_max_rotation_correction_deg_) ||
-        icp_max_rotation_correction_deg_ <= 0.0)
-    {
-      icp_max_rotation_correction_deg_ = 20.0;
-    }
-    icp_max_source_points_ = std::max(100, icp_max_source_points_);
-    icp_max_target_points_ = std::max(100, icp_max_target_points_);
-    icp_min_points_ = std::max(10, icp_min_points_);
-    icp_submap_half_width_ = std::max(0, icp_submap_half_width_);
-    icp_max_iterations_ = std::max(1, icp_max_iterations_);
     loop_min_interval_ = std::max(0, loop_min_interval_);
     loop_diagnostic_stride_ = std::max(0, loop_diagnostic_stride_);
     map_publish_stride_ = std::max(1, map_publish_stride_);
@@ -369,110 +320,56 @@ namespace super_lio_slam
                       static_cast<std::size_t>(keyframe_cloud_max_points_));
   }
 
-  std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifyWithIcp(
+  std::unique_ptr<LoopBackendNode::RegistrationObservation> LoopBackendNode::verifyWithGicp(
       const CloudPtr &current_cloud, const CloudPtr &target, std::size_t current_index,
       std::size_t historical_index,
-      const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const
+      const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &proposal,
+      const Eigen::Matrix4d *odom_hint) const
   {
-    if (!target || !current_cloud ||
-        !std_transform.first.allFinite() || !std_transform.second.allFinite())
+    const auto &settings = registration_settings_;
+    const auto source = downsample(current_cloud, settings.voxel, settings.max_source);
+    RegistrationResult initial;
+    initial.accepted = true;
+    initial.transform.block<3, 3>(0, 0) = proposal.second;
+    initial.transform.block<3, 1>(0, 3) = proposal.first;
+    auto result = refineRegister(source, target, source, settings, initial);
+    const char *selected_hint = "proposal";
+    // Repeated structures can give STD a plausible but locally incorrect hint.
+    // Try the continuous odometry hint as well; both attempts use identical gates.
+    if (odom_hint && (*odom_hint - initial.transform).norm() > 1e-6)
     {
-      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: invalid input or initial transform",
-                  historical_index, current_index);
-      return nullptr;
-    }
-    const CloudPtr source = downsample(
-        current_cloud, icp_voxel_size_,
-        static_cast<std::size_t>(icp_max_source_points_));
-    if (source->size() < static_cast<std::size_t>(icp_min_points_) ||
-        target->size() < static_cast<std::size_t>(icp_min_points_))
-    {
-      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: insufficient points (%zu source, %zu target, need %d)",
-                  historical_index, current_index, source->size(), target->size(), icp_min_points_);
-      return nullptr;
-    }
-
-    Eigen::Matrix4f initial = Eigen::Matrix4f::Identity();
-    initial.block<3, 3>(0, 0) = std_transform.second.cast<float>();
-    initial.block<3, 1>(0, 3) = std_transform.first.cast<float>();
-    pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
-    icp.setInputSource(source);
-    icp.setInputTarget(target);
-    icp.setMaximumIterations(icp_max_iterations_);
-    icp.setMaxCorrespondenceDistance(icp_max_correspondence_distance_);
-    icp.setTransformationEpsilon(1e-6);
-    icp.setEuclideanFitnessEpsilon(1e-6);
-    Cloud aligned;
-    icp.align(aligned, initial);
-
-    // 阈值判断，是否达到对应的精度
-    if (aligned.empty() || !icp.hasConverged() ||
-        !std::isfinite(icp.getFitnessScore()) ||
-        icp.getFitnessScore() > icp_fitness_threshold_)
-    {
-      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: converged=%d, aligned=%zu, fitness=%.3f (limit %.3f)",
-                  historical_index, current_index, icp.hasConverged(), aligned.size(),
-                  icp.getFitnessScore(), icp_fitness_threshold_);
-      return nullptr;
-    }
-    const Eigen::Matrix4f result = icp.getFinalTransformation();
-    if (!result.allFinite())
-    {
-      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: nonfinite transform",
-                  historical_index, current_index);
-      return nullptr;
-    }
-    const Eigen::Matrix4d correction =
-        initial.cast<double>().inverse() * result.cast<double>();
-    const double correction_translation = correction.block<3, 1>(0, 3).norm();
-    const double correction_rotation = degrees(
-        Eigen::AngleAxisd(correction.block<3, 3>(0, 0)).angle());
-    if (correction_translation > icp_max_translation_correction_ ||
-        correction_rotation > icp_max_rotation_correction_deg_)
-    {
-      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: correction %.3f m, %.2f deg (limits %.3f m, %.2f deg)",
-                  historical_index, current_index, correction_translation, correction_rotation,
-                  icp_max_translation_correction_, icp_max_rotation_correction_deg_);
-      return nullptr;
-    }
-
-    pcl::KdTreeFLANN<pcl::PointXYZI> tree;
-    tree.setInputCloud(target);
-    std::vector<int> indices(1);
-    std::vector<float> squared_distances(1);
-    std::size_t correspondences = 0;
-    const double maximum_squared = icp_max_correspondence_distance_ *
-                                   icp_max_correspondence_distance_;
-    for (const auto &point : aligned)
-    {
-      if (tree.nearestKSearch(point, 1, indices, squared_distances) == 1 &&
-          squared_distances.front() <= maximum_squared)
+      initial.transform = *odom_hint;
+      const auto alternative = refineRegister(source, target, source, settings, initial);
+      RCLCPP_DEBUG(get_logger(), "GICP odometry attempt %zu -> %zu: stage=%s mse=%.4f overlap=%.3f",
+                   historical_index, current_index, alternative.reason.c_str(), alternative.mse, alternative.overlap);
+      const auto cost = [&settings](const RegistrationResult &candidate)
       {
-        ++correspondences;
+        // Penalize unmatched source points instead of rewarding a tiny good subset.
+        return candidate.overlap * candidate.mse +
+               (1.0 - candidate.overlap) * settings.quality_radius * settings.quality_radius;
+      };
+      if (alternative.accepted && (!result.accepted || cost(alternative) < cost(result)))
+      {
+        result = alternative;
+        selected_hint = "odom";
       }
     }
-    const double overlap = static_cast<double>(correspondences) /
-                           static_cast<double>(aligned.size());
-    if (!std::isfinite(overlap) || overlap < icp_min_overlap_ratio_)
-    {
-      RCLCPP_INFO(get_logger(), "ICP %zu -> %zu rejected: overlap %.3f (minimum %.3f)",
-                  historical_index, current_index, overlap, icp_min_overlap_ratio_);
+    RCLCPP_INFO(get_logger(),
+                "GICP %zu -> %zu %s: stage=%s initial=%s mse=%.4f m2 overlap=%.3f "
+                "current_overlap=%.3f inliers=%zu info_ratio=%.6f",
+                historical_index, current_index, result.accepted ? "passed" : "rejected",
+                result.reason.c_str(), selected_hint, result.mse, result.overlap,
+                result.current_overlap, result.inliers, result.information_ratio);
+    if (!result.accepted)
       return nullptr;
-    }
-
-    const Eigen::Matrix3d rotation = result.block<3, 3>(0, 0).cast<double>();
-    Eigen::Quaterniond q(rotation);
-    q.normalize();
-    auto observation = std::make_unique<IcpObservation>();
-    observation->historical_from_current = gtsam::Pose3(
-        gtsam::Rot3(q.w(), q.x(), q.y(), q.z()),
-        gtsam::Point3(result(0, 3), result(1, 3), result(2, 3)));
-    observation->fitness = icp.getFitnessScore();
-    observation->overlap = overlap;
+    auto observation = std::make_unique<RegistrationObservation>();
+    observation->historical_from_current = gtsam::Pose3(result.transform);
+    observation->fitness = result.mse;
+    observation->overlap = result.overlap;
     return observation;
   }
 
-  std::unique_ptr<LoopBackendNode::IcpObservation> LoopBackendNode::verifySubmaps(
+  std::unique_ptr<LoopBackendNode::RegistrationObservation> LoopBackendNode::verifySubmaps(
       const SubmapWindow &source_window, const SubmapWindow &target_window, const CloudPtr &current_cloud,
       std::size_t historical_index, const Eigen::Matrix4d *hint) const
   {
@@ -520,7 +417,7 @@ namespace super_lio_slam
     }
     if (!result.accepted)
       return nullptr;
-    auto observation = std::make_unique<IcpObservation>();
+    auto observation = std::make_unique<RegistrationObservation>();
     observation->historical_from_current = gtsam::Pose3(result.transform);
     observation->fitness = result.mse;
     observation->overlap = result.overlap;
@@ -639,7 +536,7 @@ namespace super_lio_slam
         std::lock_guard<std::mutex> lock(graph_mutex_);
         for (std::size_t h = 0; h < index; ++h)
         {
-          if (!loopTimeEligible(msg->header.stamp, h)) // 查看是否在时间限制内，回环必须是 30 s 外的点云才可以做
+          if (!loopCandidateEligible(msg->header.stamp, raw_pose, h))
             continue;
           const double distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
           if (distance <= candidate_radius_m_)
@@ -658,6 +555,7 @@ namespace super_lio_slam
           match.historical_index = h;
           const auto proposal = frames_[h].odom_pose.between(raw_pose);
           match.proposal = {proposal.translation(), proposal.rotation().matrix()};
+          match.have_pose_hint = true;
           if (registration_mode_ == "std_teaser_gicp")
           {
             match.target_window = SubmapWindow(submap_limits_);
@@ -675,11 +573,11 @@ namespace super_lio_slam
           }
           else
           {
-            const auto half = static_cast<std::size_t>(std::max(0, icp_submap_half_width_));
+            const auto half = static_cast<std::size_t>(std::max(0, gicp_submap_half_width_));
             const auto first = h > half ? h - half : 0;
             const auto last = std::min(index - 1, h + half);
-            match.legacy_anchor = frames_[h].odom_pose;
-            match.legacy_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
+            match.local_anchor = frames_[h].odom_pose;
+            match.local_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
           }
           selected.push_back(h);
           const double gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
@@ -709,10 +607,14 @@ namespace super_lio_slam
               const int h = candidate.match_id_.second;
               if (h < 0 || static_cast<std::size_t>(h) >= index)
                 continue;
+              double candidate_distance;
+              double time_gap;
               {
                 std::lock_guard<std::mutex> lock(graph_mutex_);
-                if (!loopTimeEligible(msg->header.stamp, static_cast<std::size_t>(h)))
+                if (!loopCandidateEligible(msg->header.stamp, raw_pose, static_cast<std::size_t>(h)))
                   continue;
+                candidate_distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
+                time_gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
               }
               if (std::any_of(tried.begin(), tried.end(), [h](int p)
                               { return std::abs(p - h) <= 2; }))
@@ -722,8 +624,8 @@ namespace super_lio_slam
               tried.push_back(h);
               RegistrationCandidate match;
               match.historical_index = static_cast<std::size_t>(h);
-              if (!std_manager_.CandidatePoseHint(candidate, match.proposal))
-                continue;
+              // STD retrieves places; a failed pose hint does not reject a candidate.
+              match.have_pose_hint = std_manager_.CandidatePoseHint(candidate, match.proposal);
               // Snapshot raw poses/clouds briefly; assembling/downsampling is a worker task.
               {
                 std::lock_guard<std::mutex> lock(graph_mutex_);
@@ -738,7 +640,10 @@ namespace super_lio_slam
               }
               if (pending_window.sharesFrames(match.target_window))
                 continue;
-              RCLCPP_INFO(get_logger(), "STD %d -> %zu matched: triangle consistency passed", h, index);
+              RCLCPP_INFO(get_logger(),
+                          "STD %d -> %zu matched: time_gap=%.3f s (> %.3f) distance=%.2f m (<= %.2f) hint=%s",
+                          h, index, time_gap, loop_min_time_separation_s_, candidate_distance,
+                          candidate_radius_m_, match.have_pose_hint ? "STD" : "none");
               task.candidates.push_back(std::move(match));
             }
           }
@@ -749,22 +654,23 @@ namespace super_lio_slam
             RegistrationCandidate match;
             std::vector<std::pair<STDesc, STDesc>> pairs;
             std_manager_.SearchLoop(descriptors, result, match.proposal, pairs, nullptr,
-                                    [this, &msg](int historical)
+                                    [this, &msg, &raw_pose](int historical)
                                     {
                                       std::lock_guard<std::mutex> lock(graph_mutex_);
-                                      return historical >= 0 && loopTimeEligible(msg->header.stamp,
-                                                                                 static_cast<std::size_t>(historical));
+                                      return historical >= 0 && loopCandidateEligible(msg->header.stamp, raw_pose,
+                                                                                      static_cast<std::size_t>(historical));
                                     });
             if (result.first >= 0 && static_cast<std::size_t>(result.first) < index)
             {
               match.historical_index = static_cast<std::size_t>(result.first);
-              // Legacy targets also become local snapshots, assembled by the worker.
-              const std::size_t half = static_cast<std::size_t>(std::max(0, icp_submap_half_width_));
+              // Direct GICP targets are local snapshots, assembled by the worker.
+              const std::size_t half = static_cast<std::size_t>(std::max(0, gicp_submap_half_width_));
               const std::size_t first = match.historical_index > half ? match.historical_index - half : 0;
               const std::size_t last = std::min(index - 1, match.historical_index + half);
               std::lock_guard<std::mutex> lock(graph_mutex_);
-              match.legacy_anchor = frames_[match.historical_index].odom_pose;
-              match.legacy_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
+              match.local_anchor = frames_[match.historical_index].odom_pose;
+              match.odom_hint = match.local_anchor.between(raw_pose).matrix();
+              match.local_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
               RCLCPP_INFO(get_logger(), "STD %zu -> %zu matched: score=%.3f", match.historical_index, index, result.second);
               task.candidates.push_back(std::move(match));
             }
@@ -1081,7 +987,8 @@ namespace super_lio_slam
             break;
           {
             std::lock_guard<std::mutex> lock(graph_mutex_);
-            if (!loopTimeEligible(frames_[task.index].stamp, candidate.historical_index))
+            if (!loopCandidateEligible(frames_[task.index].stamp, frames_[task.index].odom_pose,
+                                       candidate.historical_index))
               continue;
             if (have_loop_ && (task.index <= last_loop_index_ ||
                                task.index - last_loop_index_ < static_cast<std::size_t>(loop_min_interval_)))
@@ -1090,7 +997,7 @@ namespace super_lio_slam
           if (candidate_mode_ == "distance")
             RCLCPP_INFO(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m; verifying registration",
                         candidate.historical_index, task.index, candidate.proposal.first.norm());
-          std::unique_ptr<IcpObservation> observation;
+          std::unique_ptr<RegistrationObservation> observation;
           if (registration_mode_ == "std_teaser_gicp")
           {
             Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
@@ -1098,24 +1005,26 @@ namespace super_lio_slam
             hint.block<3, 1>(0, 3) = candidate.proposal.first;
             // 确认子图，获取观测
             observation = verifySubmaps(task.source_window, candidate.target_window,
-                                        task.current_cloud, candidate.historical_index, &hint);
+                                        task.current_cloud, candidate.historical_index,
+                                        candidate.have_pose_hint ? &hint : nullptr);
           }
           else
           {
             CloudPtr merged(new Cloud);
             const auto cap = std::max<std::size_t>(100,
-                                                   2 * icp_max_target_points_ / candidate.legacy_frames.size());
-            for (const auto &frame : candidate.legacy_frames)
+                                                   2 * registration_settings_.max_target / candidate.local_frames.size());
+            for (const auto &frame : candidate.local_frames)
             {
               Cloud transformed;
-              const auto local = downsample(frame.cloud, icp_voxel_size_, cap);
+              const auto local = downsample(frame.cloud, registration_settings_.voxel, cap);
               pcl::transformPointCloud(*local, transformed,
-                                       candidate.legacy_anchor.between(frame.odom_pose).matrix().cast<float>().eval());
+                                       candidate.local_anchor.between(frame.odom_pose).matrix().cast<float>().eval());
               *merged += transformed;
             }
-            const auto target = downsample(merged, icp_voxel_size_, icp_max_target_points_);
-            observation = verifyWithIcp(task.current_cloud, target, task.index,
-                                        candidate.historical_index, candidate.proposal);
+            const auto target = downsample(merged, registration_settings_.voxel, registration_settings_.max_target);
+            observation = verifyWithGicp(task.current_cloud, target, task.index,
+                                        candidate.historical_index, candidate.proposal,
+                                        candidate.odom_hint ? &*candidate.odom_hint : nullptr);
           }
           if (observation && !stopping_)
           {
@@ -1152,13 +1061,21 @@ namespace super_lio_slam
            static_cast<long double>(loop_min_time_separation_s_) * 1000000000.0L;
   }
 
+  bool LoopBackendNode::loopCandidateEligible(
+      const builtin_interfaces::msg::Time &current, const gtsam::Pose3 &raw_pose,
+      std::size_t historical) const
+  {
+    return loopTimeEligible(current, historical) &&
+           (frames_[historical].odom_pose.translation() - raw_pose.translation()).norm() <= candidate_radius_m_;
+  }
+
   void LoopBackendNode::commitLoop(std::size_t index, std::size_t historical,
-                                   const IcpObservation &observation)
+                                   const RegistrationObservation &observation)
   {
     // graph_mutex_ held. A delayed result connects existing nodes; it never inserts
     // another initial value or resets the current pose to the old task's pose.
     if (index >= frames_.size() || historical >= index ||
-        !loopTimeEligible(frames_[index].stamp, historical))
+        !loopCandidateEligible(frames_[index].stamp, frames_[index].odom_pose, historical))
       return;
     const auto begin = std::chrono::steady_clock::now();
     try
@@ -1197,7 +1114,7 @@ namespace super_lio_slam
     }
     publishCurrent(latest, true);
     RCLCPP_INFO(get_logger(), "Loop %zu -> %zu accepted: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
-                historical, index, registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "ICP",
+                historical, index, registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "GICP",
                 observation.fitness, observation.overlap, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count(), latest);
   }
 

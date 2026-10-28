@@ -1,5 +1,7 @@
 #include "loop/SubmapRegistration.hpp"
 #include <iostream>
+#include <cmath>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <pcl/common/transforms.h>
@@ -38,7 +40,6 @@ int main() {
     require(window.sharesFrames(travel) && !timed.sharesFrames(SubmapWindow{}),"shared members");
     Eigen::Matrix4d invalid=Eigen::Matrix4d::Identity();invalid(0,0)=2;
     require(!validRigidTransform(invalid),"scaled transform accepted");
-#ifdef SUPERLIO_WITH_TEASER
     RegistrationCloud::Ptr target(new RegistrationCloud);
     std::mt19937 rng(47);std::uniform_real_distribution<float> random(0,1);
     for (int box=0;box<5;++box) for(int face=0;face<6;++face) for(int j=0;j<500;++j) {
@@ -61,6 +62,48 @@ int main() {
     RegistrationSettings settings;settings.voxel=.3;settings.normal_radius=.8;settings.feature_radius=1.6;
     settings.min_baseline=1;settings.min_inliers=50;settings.quality_radius=.6;settings.max_mse=.05;
     auto src=source_window.cloud(settings.voxel,10000),dst=target_window.cloud(settings.voxel,10000);
+    // Direct GICP must recover historical <- current from an imperfect odometry hint,
+    // even when TEASER++ is disabled at build time.
+    RegistrationResult initial;
+    initial.accepted=true;
+    initial.transform=pose(.30,.9,-.3).matrix();
+    const auto direct=refineRegister(src,dst,source,settings,initial);
+    require(direct.accepted,"direct GICP known transform rejected");
+    require((direct.transform-truth.matrix()).norm()<.12,"direct GICP transform direction");
+    auto boundary_settings=settings;
+    boundary_settings.max_mse=direct.mse;
+    const auto equal_mse=refineRegister(src,dst,source,boundary_settings,initial);
+    require(!equal_mse.accepted && equal_mse.reason=="high_inlier_mse",
+            "MSE equal to the strict upper bound accepted");
+    boundary_settings.max_mse=std::nextafter(direct.mse,std::numeric_limits<double>::infinity());
+    require(refineRegister(src,dst,source,boundary_settings,initial).accepted,
+            "MSE immediately below the upper bound rejected");
+
+    // A real cloud with four matching points for each distant outlier gives exactly 80% coverage.
+    RegistrationCloud::Ptr eighty_percent(new RegistrationCloud);
+    const std::size_t matched=std::min<std::size_t>(src->size(),2000)/4*4;
+    for (std::size_t k=0;k<matched;++k) eighty_percent->push_back((*src)[k]);
+    for (std::size_t k=0;k<matched/4;++k) {
+      pcl::PointXYZI p;p.x=100.0f+k*.1f;p.y=100.0f;p.z=100.0f;
+      eighty_percent->push_back(p);
+    }
+    boundary_settings=settings;
+    boundary_settings.min_overlap=.8;
+    boundary_settings.min_current_overlap=.8;
+    const auto equal_source=refineRegister(eighty_percent,dst,source,boundary_settings,initial);
+    require(!equal_source.accepted && equal_source.reason=="low_overlap" && equal_source.overlap==.8,
+            "source coverage equal to 80% accepted");
+    const auto equal_current=refineRegister(src,dst,eighty_percent,boundary_settings,initial);
+    require(!equal_current.accepted && equal_current.reason=="low_overlap" && equal_current.current_overlap==.8,
+            "current-frame coverage equal to 80% accepted");
+    auto bad_initial=initial;
+    bad_initial.transform(0,0)=2;
+    const auto invalid_hint=refineRegister(src,dst,source,settings,bad_initial);
+    require(!invalid_hint.accepted && invalid_hint.reason=="invalid_initial_transform",
+            "invalid GICP initial transform accepted");
+    require(!refineRegister(one(0),one(0),one(0),settings,initial).accepted,
+            "sparse direct GICP input accepted");
+#ifdef SUPERLIO_WITH_TEASER
     auto coarse=coarseRegister(src,dst,settings);
     std::cout<<"coarse "<<coarse.reason<<" pairs="<<coarse.pairs<<" inliers="<<coarse.coarse_inliers<<"\n"<<coarse.transform<<std::endl;
     require(coarse.accepted,"TEASER known transform rejected");
@@ -75,16 +118,16 @@ int main() {
     std::cout<<"fine "<<fine.reason<<" mse="<<fine.mse<<" overlap="<<fine.overlap<<std::endl;
     require(fine.accepted,"GICP known transform rejected");
     require((fine.transform-truth.matrix()).norm()<.12,"incorrect full registration transform");
+    require(!coarseRegister(one(0),one(0),settings).accepted,"sparse coarse input accepted");
+#endif
     settings.min_overlap=1.01;
-    require(!refineRegister(src,dst,source,settings,coarse).accepted,"quality gate failed to reject");
-    require(!coarseRegister(one(0),one(0),settings).accepted,"sparse input accepted");
+    require(!refineRegister(src,dst,source,settings,initial).accepted,"quality gate failed to reject");
     settings.min_overlap=.35;
     RegistrationCloud::Ptr plane(new RegistrationCloud);
     for(int k=0;k<600;++k) {pcl::PointXYZI p;p.x=random(rng)*10;p.y=random(rng)*10;p.z=0;plane->push_back(p);}
-    coarse.accepted=true;coarse.transform=Eigen::Matrix4d::Identity();
-    const auto degenerate=refineRegister(plane,plane,plane,settings,coarse);
+    initial.transform=Eigen::Matrix4d::Identity();
+    const auto degenerate=refineRegister(plane,plane,plane,settings,initial);
     require(!degenerate.accepted && degenerate.reason=="degenerate_geometry","single plane observability gate");
-#endif
     std::cout<<"PASS: deque geometry, limits, snapshots and registration gates"<<std::endl;
   } catch(const std::exception& e) {std::cerr<<"FAIL: "<<e.what()<<std::endl;return 1;}
 }

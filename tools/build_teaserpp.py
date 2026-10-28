@@ -23,7 +23,7 @@ def main():
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error('--jobs must be positive')
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[1]
     source = root / 'src/SuperLIO_SLAM/third_party/TEASER-plusplus'
     if output('git', '-C', str(source), 'rev-parse', 'HEAD') != TEASER_COMMIT:
         raise RuntimeError('Unexpected TEASER++ version; initialize the pinned submodule')

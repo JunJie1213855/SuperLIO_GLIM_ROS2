@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the real STD -> ICP -> iSAM2 ROS node on a repeated static scene.
+"""Exercise the real STD -> GICP -> iSAM2 ROS node on a repeated static scene.
 
 Run after sourcing the package overlay. An optional binary XYZI PCD supplies a
 real scene; the default scene is deterministic and generated in memory.
@@ -58,8 +58,8 @@ def main():
     parser.add_argument('--backend', required=True, help='loop_backend_node executable')
     parser.add_argument('--pcd', help='Optional binary PCD scene')
     parser.add_argument('--moving', action='store_true', help='Use nonzero true translation and rotation')
-    parser.add_argument('--reject-icp', action='store_true', help='Force the ICP minimum-point gate to reject candidates')
-    parser.add_argument('--mode', choices=['std_icp', 'std_teaser_gicp'], default='std_icp')
+    parser.add_argument('--reject-registration', action='store_true', help='Force the registration minimum-point gate to reject candidates')
+    parser.add_argument('--mode', choices=['std_gicp', 'std_teaser_gicp'], default='std_gicp')
     parser.add_argument('--candidate-mode', choices=['std','distance'], default='std')
     parser.add_argument('--candidate-radius', type=float, default=15.0)
     parser.add_argument('--reject-distance', action='store_true')
@@ -70,7 +70,7 @@ def main():
     parser.add_argument('--timestamp-step', type=float, default=0.0, help='Synthetic sensor seconds per frame; zero uses node time')
     parser.add_argument('--reject-time-window', action='store_true')
     args = parser.parse_args()
-    expect_rejection = args.reject_icp or args.reject_time_window or args.reject_distance
+    expect_rejection = args.reject_registration or args.reject_time_window or args.reject_distance
     os.environ.setdefault('ROS_DOMAIN_ID', '127')
     os.environ.setdefault('ROS_LOCALHOST_ONLY', '1')
     os.environ.setdefault('ROS_LOG_DIR', '/tmp/super_lio_slam_test_logs')
@@ -78,8 +78,7 @@ def main():
     points = points[np.isfinite(points).all(axis=1)]
     log = tempfile.NamedTemporaryFile(prefix='super_lio_loop_test_', suffix='.log', delete=False)
     command = [args.backend, '--ros-args', '-p', 'skip_near_num:=2',
-               '-p', 'loop_min_interval:=1', '-p', 'icp_submap_half_width:=0',
-               '-p', 'icp_max_translation_correction:=5.0',
+               '-p', 'loop_min_interval:=1', '-p', 'gicp_submap_half_width:=0',
                '-p', 'graph_loop_translation_sigma:=0.02',
                '-p', 'map_publish_stride:=1',
                '-p', f'loop_registration_mode:={args.mode}',
@@ -89,8 +88,8 @@ def main():
                '-p', f'coarse_min_inlier_ratio:={args.coarse_inlier_ratio}',
                '-p', f'coarse_max_inlier_rmse_m:={args.coarse_max_rmse}',
                '-p', f'loop_min_time_separation_s:={args.loop_min_time_separation}']
-    if args.reject_icp:
-        command += ['-p', 'registration_min_points:=100000' if args.mode == 'std_teaser_gicp' else 'icp_min_points:=20000']
+    if args.reject_registration:
+        command += ['-p', 'registration_min_points:=100000']
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
     rclpy.init()
     node = rclpy.create_node('online_loop_smoke')
@@ -117,7 +116,7 @@ def main():
             msg.header.frame_id = 'world'
             msg.id = index
             # A grid-aligned 90-degree revisit preserves the procedural scene's
-            # corners while exposing an inverted ICP/BetweenFactor transform.
+            # corners while exposing an inverted GICP/BetweenFactor transform.
             true_translation = np.array([2.0, 2.0, 0.0]) if args.moving and index >= 3 else np.zeros(3)
             true_yaw = np.pi / 2 if args.moving and index >= 3 else 0.0
             raw_yaw = true_yaw + (0.02 * index if args.moving else 0.0)
@@ -191,10 +190,10 @@ def main():
         last_path = paths[-1].poses[-1].pose.position
         assert np.linalg.norm(np.array([last_path.x,last_path.y,last_path.z])-np.array([pose.position.x,pose.position.y,pose.position.z])) < 1e-5, 'Path and graph odometry disagree'
         if expect_rejection:
-            assert not has_loop, 'Rejected ICP candidate created a loop marker'
-            assert abs(corrected - 1.0) < 0.01, f'Rejected ICP changed odometry: {corrected}'
+            assert not has_loop, 'Rejected GICP candidate created a loop marker'
+            assert abs(corrected - 1.0) < 0.01, f'Rejected GICP changed odometry: {corrected}'
             print('PASS: candidate gate rejection left the 1.000 m raw drift unchanged' if args.reject_time_window or args.reject_distance
-                  else 'PASS: ICP rejection left the 1.000 m raw drift unchanged')
+                  else 'PASS: GICP rejection left the 1.000 m raw drift unchanged')
         else:
             assert has_loop, 'No accepted loop'
             history = paths[-1].poses[1].pose.position
@@ -214,12 +213,15 @@ def main():
             assert 'Distance candidate ' in diagnostic_log and 'STD ' not in diagnostic_log, 'Distance retrieval was not exercised'
         else:
             assert 'STD ' in diagnostic_log and 'matched:' in diagnostic_log, 'Missing verified STD match'
-        if args.reject_icp:
+        if args.reject_registration:
             assert ('stage=few_points' in diagnostic_log if args.mode == 'std_teaser_gicp'
-                    else 'rejected: insufficient points' in diagnostic_log), 'Missing registration gate diagnostic'
+                    else 'stage=few_gicp_points' in diagnostic_log), 'Missing registration gate diagnostic'
         if args.mode == 'std_teaser_gicp' and not expect_rejection:
             assert 'TEASER/GICP' in diagnostic_log, 'New registration mode was not exercised'
             assert 'coarse_rmse=' in diagnostic_log and 'gicp=executed' in diagnostic_log, 'Missing registration quality summary'
+        elif args.mode == 'std_gicp' and not expect_rejection:
+            assert 'accepted: GICP' in diagnostic_log, 'Direct GICP was not exercised'
+            assert 'stage=accepted' in diagnostic_log, 'Missing direct GICP quality decision'
         print(f'Backend log: {log.name}')
     finally:
         node.destroy_node()

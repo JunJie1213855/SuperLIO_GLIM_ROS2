@@ -1,4 +1,5 @@
-# Runtime settings for loop_registration_mode:=std_teaser_gicp.
+# Shared GICP settings for std_gicp and std_teaser_gicp.
+# FPFH/TEASER settings apply only to std_teaser_gicp.
 # Defaults are experimental; calibrate on each sensor and bag before changing the default mode.
 loop_backend_node:
   ros__parameters:
@@ -31,10 +32,10 @@ loop_backend_node:
     gicp_correspondence_randomness: 20
     gicp_max_correspondence_distance_m: 2.0
     quality_nn_radius_m: 1.0
-    quality_min_source_overlap: 0.35
-    quality_min_current_frame_overlap: 0.35
+    quality_min_source_overlap: 0.8  # strict: source coverage > 80%
+    quality_min_current_frame_overlap: 0.8  # strict: current-frame coverage > 80%
     quality_min_inlier_count: 100
-    quality_max_inlier_mse_m2: 0.25
+    quality_max_inlier_mse_m2: 0.1  # strict: inlier MSE < 0.1 m^2
     quality_min_information_ratio: 0.00001
     quality_max_refinement_translation_m: 5.0
     quality_max_refinement_rotation_deg: 20.0

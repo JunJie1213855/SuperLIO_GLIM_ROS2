@@ -49,7 +49,7 @@ class LoopBackendNode final : public rclcpp::Node {
     CloudPtr cloud;
   };
 
-  struct IcpObservation {
+  struct RegistrationObservation {
     gtsam::Pose3 historical_from_current;
     double fitness = 0.0;
     double overlap = 0.0;
@@ -58,9 +58,12 @@ class LoopBackendNode final : public rclcpp::Node {
   struct RegistrationCandidate {
     std::size_t historical_index = 0;
     SubmapWindow target_window;
-    std::vector<Frame> legacy_frames;
-    gtsam::Pose3 legacy_anchor;
-    std::pair<Eigen::Vector3d, Eigen::Matrix3d> proposal;
+    std::vector<Frame> local_frames;
+    gtsam::Pose3 local_anchor;
+    std::pair<Eigen::Vector3d, Eigen::Matrix3d> proposal{
+        Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
+    bool have_pose_hint = false;
+    std::optional<Eigen::Matrix4d> odom_hint;
   };
   struct RegistrationTask {
     std::size_t index = 0;
@@ -79,18 +82,22 @@ class LoopBackendNode final : public rclcpp::Node {
   void enqueueRegistration(RegistrationTask task);
   bool loopTimeEligible(const builtin_interfaces::msg::Time& current,
                         std::size_t historical) const; // graph_mutex_ held
+  bool loopCandidateEligible(const builtin_interfaces::msg::Time& current,
+                             const gtsam::Pose3& raw_pose,
+                             std::size_t historical) const; // graph_mutex_ held
   void commitLoop(std::size_t index, std::size_t historical,
-                  const IcpObservation& observation);
+                  const RegistrationObservation& observation);
   void requestMap(const builtin_interfaces::msg::Time& stamp);
 
   void onKeyFrame(const super_lio_slam::msg::KeyFrame::SharedPtr msg);
   CloudPtr convertAndFilter(const sensor_msgs::msg::PointCloud2 &message) const;
   CloudPtr downsample(const CloudPtr &cloud, double voxel_size,
                       std::size_t max_points) const;
-  std::unique_ptr<IcpObservation> verifyWithIcp(
+  std::unique_ptr<RegistrationObservation> verifyWithGicp(
       const CloudPtr &current_cloud, const CloudPtr &target, std::size_t current_index,
       std::size_t historical_index,
-      const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &std_transform) const;
+      const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &proposal,
+      const Eigen::Matrix4d *odom_hint) const;
 
   void addGraphNode(std::size_t index, const gtsam::Pose3 &raw_pose);
   void publishCurrent(std::size_t index, bool loop_accepted);
@@ -104,7 +111,7 @@ class LoopBackendNode final : public rclcpp::Node {
   static gtsam::Pose3 poseFromMsg(const geometry_msgs::msg::Pose &pose);
   static geometry_msgs::msg::Pose poseToMsg(const gtsam::Pose3 &pose);
 
-  std::unique_ptr<IcpObservation> verifySubmaps(
+  std::unique_ptr<RegistrationObservation> verifySubmaps(
       const SubmapWindow& source, const SubmapWindow& target, const CloudPtr& current_cloud,
       std::size_t historical_index, const Eigen::Matrix4d* hint) const;
   std::string registration_mode_;
@@ -138,17 +145,7 @@ class LoopBackendNode final : public rclcpp::Node {
 
   double keyframe_cloud_voxel_size_ = 0.25;
   int keyframe_cloud_max_points_ = 30000;
-  double icp_voxel_size_ = 0.5;
-  double icp_max_correspondence_distance_ = 2.0;
-  int icp_max_iterations_ = 50;
-  double icp_fitness_threshold_ = 0.8;
-  double icp_min_overlap_ratio_ = 0.35;
-  double icp_max_translation_correction_ = 3.0;
-  double icp_max_rotation_correction_deg_ = 20.0;
-  int icp_submap_half_width_ = 5;
-  int icp_min_points_ = 100;
-  int icp_max_source_points_ = 10000;
-  int icp_max_target_points_ = 50000;
+  int gicp_submap_half_width_ = 5;
   int loop_min_interval_ = 20;
   double loop_min_time_separation_s_ = 30.0;
   int loop_diagnostic_stride_ = 1;

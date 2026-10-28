@@ -8,10 +8,11 @@
 ```bash
   SuperLIO_GLIM_ROS2/
   ├── src/
-  │   ├── SuperLIO_SLAM/  # SuperLIO、STD 回环检测、ICP 和 iSAM2 后端
+  │   ├── SuperLIO_SLAM/  # SuperLIO、距离/STD 检索、GICP/TEASER++、iSAM2
   │   ├── glim/           # GLIM v1.2.2
   │   └── glim_ros2/      # GLIM ROS 2 节点与 offline_viewer
   └── tools/
+      ├── build_teaserpp.py  # 构建并安装固定版本 TEASER++
       ├── export_superlio.py
       ├── lio2glim.py
       ├── glim2lio.py       # 反向：dump → PCD + TUM（见第 5 节）
@@ -82,33 +83,84 @@ sudo make install
 sudo ldconfig
 ```
 
-开始编译代码
+本机工作区位于 `/home/ros/rosws/SuperLIO_GLIM_ROS2`；以下命令均从工作区根目录执行。
+Livox 驱动工作区为 `/home/ros/rosws/livox_ros_ws`，换机器后按实际位置调整。
+
+先构建 TEASER++，再编译 ROS 包。`SUPERLIO_WITH_TEASER` 默认开启，
+默认回环为 `std` 候选检索 + `std_teaser_gicp` 配准，因此需要 TEASER++。
+仅初始化源码子模块不会生成 CMake 所需的安装配置。
+
 ```bash
-cd /home/ros/ros_ws/SLAM_Merge_ws
+cd /home/ros/rosws/SuperLIO_GLIM_ROS2
 source /opt/ros/humble/setup.bash
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
 
-# 如果安装了 ros2 humble 的 gtsam4.2 就带上这个
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH  
+git submodule update --init --recursive
+python3 tools/build_teaserpp.py --jobs 1
 
+# 保证 GLIM 使用构建时选定的 /usr/local GTSAM
+export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-}
 
-MAKEFLAGS="-j4" colcon build --symlink-install \
---cmake-args \
--DGTSAM_DIR=/usr/local/lib/cmake/GTSAM \
--DGTSAM_UNSTABLE_DIR=/usr/local/lib/cmake/GTSAM_UNSTABLE
+MAKEFLAGS=-j1 colcon build --symlink-install --executor sequential \
+  --cmake-args \
+  -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM \
+  -DGTSAM_UNSTABLE_DIR=/usr/local/lib/cmake/GTSAM_UNSTABLE \
+  -DSUPERLIO_WITH_TEASER=ON -DBUILD_TESTING=ON
+source install/setup.bash
+```
+
+构建脚本位于 `tools/build_teaserpp.py`，不是 `src/tools/`。它从脚本位置定位
+工作区，在 `build/teaserpp_vendor` 缓存固定版本依赖，在 `build/teaserpp` 编译，
+无需 sudo 即安装到 `install/teaserpp`。首次运行需要联网；缓存完整后可加 `--offline`。
+安装成功后应存在：
+
+```text
+install/teaserpp/lib/cmake/teaserpp/teaserppConfig.cmake
+```
+
+若 GLIM 已编译，只需修复或重编 SuperLIO，可将上方 colcon 命令改为：
+
+```bash
+MAKEFLAGS=-j1 colcon build --packages-select super_lio_slam --symlink-install \
+  --executor sequential --cmake-args \
+  -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM \
+  -DSUPERLIO_WITH_TEASER=ON -DBUILD_TESTING=ON
+source install/setup.bash
+```
+
+若暂时只使用直接 GICP，可以跳过 TEASER++ 构建脚本，并将 colcon 的选项改为
+`-DSUPERLIO_WITH_TEASER=OFF`。此时启动必须显式指定 `loop_registration_mode:=std_gicp`，不能运行默认的 `std_teaser_gicp`。
+之后启用新模式时，先构建依赖，再显式传入 `-DSUPERLIO_WITH_TEASER=ON`，避免沿用旧 CMake 缓存。
+
+2026-10-28 本机验证：TEASER++ 构建安装、上述 `super_lio_slam` 单包构建及
+`submap_registration_test`（1/1）通过；此记录不代表本次重新编译了 GLIM 或完成实测 bag 精度评估。
+迁移前的额外在线合成测试未全部通过：默认四帧配置被粗配准门限拒绝，两帧实验配置后续因 ROS 发现超时未进入配准。
+详细结果已记录在 [包说明的验证章节](src/SuperLIO_SLAM/README.md#validation-and-limitations)，不将编译通过等同于在线回环测试通过。
+2026-10-28 GICP 与默认流程迁移后的验证：单包构建和 CTest（1/1）通过。
+使用已安装的 Cyclone DDS、独立 ROS domain 运行在线合成测试，STD → 时间/距离筛选 →
+TEASER++ → GICP 正例、严格 30 s 边界拒绝、STD 空间半径拒绝和 STD + 直接 GICP
+含旋转正例均通过。默认质量门限正例使用 10 s 的合成关键帧间隔，因此 6 s 子图窗口
+在该用例内裁剪为单帧；它验证的是判决链路，不证明默认四帧强漂移场景或真实 bag 精度。
+
+测试前 source 上述工作区，并为直接运行的测试程序设置依赖库：
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/lib:/home/ros/rosws/SuperLIO_GLIM_ROS2/install/teaserpp/lib:${LD_LIBRARY_PATH:-}
+ctest --test-dir build/super_lio_slam -R submap_registration_test --output-on-failure
 ```
 
 每个新终端运行 GLIM 前：
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/SLAM_Merge_ws/install/setup.bash
+source /home/ros/rosws/SuperLIO_GLIM_ROS2/install/setup.bash
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 ```
 
 可用以下命令确认实际加载的 GTSAM：
 
 ```bash
-ldd /home/ros/ros_ws/SLAM_Merge_ws/install/glim/lib/libglim.so | grep libgtsam.so.4
+ldd /home/ros/rosws/SuperLIO_GLIM_ROS2/install/glim/lib/libglim.so | grep libgtsam.so.4
 ```
 
 输出应指向 `/usr/local/lib/libgtsam.so.4`。
@@ -121,7 +173,7 @@ ldd /home/ros/ros_ws/SLAM_Merge_ws/install/glim/lib/libglim.so | grep libgtsam.s
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/SLAM_Merge_ws/install/setup.bash
+source /home/ros/rosws/SuperLIO_GLIM_ROS2/install/setup.bash
 ros2 launch super_lio_slam unitree_slam.launch.py \
   use_sim_time:=true rviz:=true
 ```
@@ -130,7 +182,7 @@ ros2 launch super_lio_slam unitree_slam.launch.py \
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/SLAM_Merge_ws/install/setup.bash
+source /home/ros/rosws/SuperLIO_GLIM_ROS2/install/setup.bash
 mkdir -p /home/ros/dataset/unitree/superlio_results
 ros2 bag record \
   -o /home/ros/dataset/unitree/superlio_results/firstpart_result \
@@ -160,23 +212,175 @@ ros2 bag play /home/ros/dataset/unitree/secondpart --clock --rate 0.5
 
 不要在同一个后端进程中连续回放两段数据。
 
+### 1.1 不同回环方式的启动命令
+
+默认流程已经统一为：
+
+```text
+STD 描述子检索历史候选
+  → 时间差 > 30 s 且原始里程计位置距离 ≤ 15 m
+  → 构建当前/历史局部子图，FPFH 对应 + TEASER++ 粗配准
+  → 粗配准内点数、比例、残差 RMSE 检查
+  → GICP 精配准及距离、误差、覆盖率、退化检查
+  → 通过后插入 iSAM2 回环因子，更新优化轨迹与地图
+```
+
+STD 在默认流程中负责候选检索；三角形位姿提示可用时辅助 FPFH，
+不可用时仍允许无提示粗配准。候选的时间和空间门限在检索后、后台执行前及最终提交时检查。
+空间距离统一比较原始 LIO 位姿，不混用优化位姿。
+
+| 判决阶段 | 默认门限及含义 |
+| --- | --- |
+| 候选时间 | `loop_min_time_separation_s: 30.0`，时间差严格大于 30 s |
+| 候选空间距离 | `loop_candidate_radius_m: 15.0`，位置距离不超过 15 m，STD 和距离检索都生效 |
+| TEASER++ 内点距离 | `coarse_residual_threshold_m: 0.6`，对应点残差不超过 0.6 m 计为粗内点 |
+| TEASER++ 内点质量 | 最少 6 个内点、比例至少 0.3、内点 RMSE 不超过 0.3 m |
+| GICP 对应距离 | `gicp_max_correspondence_distance_m: 2.0`，求解时最大对应距离 |
+| GICP 独立质量距离 | `quality_nn_radius_m: 1.0`，最近邻距离不超过 1 m 计入质量内点 |
+| GICP 质量检查 | 内点 MSE 严格小于 0.1 m²；源子图和当前帧覆盖率都严格大于 80%；至少 100 个内点 |
+| GICP 修正及退化 | 相对初值修正不超过 5 m / 20°，信息特征值比至少 `1e-5`；还需收敛且为有效刚体变换 |
+
+粗配准的 RMSE 单位是 m，精配准的 MSE 单位是 m²；这些是几何残差，
+不是相对于真值的轨迹误差。GICP 的接受条件是内点 MSE <0.1 m² 且两项覆盖率都 >0.8；
+恰好 0.1 m² 或恰好 80% 都拒绝，不再增加独立的“分数 >0.8”条件。
+PCL 的 `getFitnessScore()` 是越小越好的均方距离，并非越大越好的 0–1 置信度。
+这里的内点 MSE 只统计质量半径内的最近邻点对，覆盖率为内点数除以参与检查的点数。
+候选筛选后仍受重复回环冷却和源/目标子图不共享成员等约束。
+本次收紧门限后，单包编译、配准单测和两条 GICP 路径的在线合成测试均通过。
+边界单测确认误差等于上限、源子图覆盖率恰好 80%、当前帧覆盖率恰好 80% 都会拒绝。
+下面命令保留四种组合，供对照或排查使用。
+
+候选检索和点云配准由两个独立参数选择；`std_gicp` / `std_teaser_gicp`
+是配准模式名称，前缀 `std_` 不会强制使用 STD 检索。
+
+| 方式 | `loop_candidate_mode` | `loop_registration_mode` |
+| --- | --- | --- |
+| 距离检索 + GICP（对照方式） | `distance` | `std_gicp` |
+| STD 检索 + GICP | `std` | `std_gicp` |
+| 距离检索 + 多帧 TEASER++ / GICP | `distance` | `std_teaser_gicp` |
+| STD 检索 + 多帧 TEASER++ / GICP（当前默认） | `std` | `std_teaser_gicp` |
+
+先在终端 A 加载环境：
+
+```bash
+cd /home/ros/rosws/SuperLIO_GLIM_ROS2
+source /opt/ros/humble/setup.bash
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
+source install/setup.bash
+```
+
+以下命令任选一条，替换前面的终端 A 启动命令；终端 B 的录制与终端 C 的
+bag 回放步骤不变。命令针对 Unitree L1 的 bag，统一使用模拟时间并启动 RViz。
+切换方式时停止当前 launch，再启动新的方式；已用 `SUPERLIO_WITH_TEASER=ON`
+构建时，四种方式之间切换不需要重新编译。
+
+**距离检索 + GICP（对照方式）**
+
+```bash
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_gicp use_sim_time:=true rviz:=true
+```
+
+**STD 检索 + GICP**
+
+```bash
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=std loop_registration_mode:=std_gicp \
+  use_sim_time:=true rviz:=true
+```
+
+**距离检索 + 多帧 TEASER++ / GICP**
+
+```bash
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_teaser_gicp use_sim_time:=true rviz:=true
+```
+
+**STD 检索 + 多帧 TEASER++ / GICP**
+
+```bash
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=std loop_registration_mode:=std_teaser_gicp \
+  use_sim_time:=true rviz:=true
+```
+
+原 `std_icp` 回环模式已移除；直接精配准使用 `std_gicp`。默认组合为 `std` + `std_teaser_gicp`。
+两条路径的精配准都调用 GICP，`std_teaser_gicp` 额外执行多帧子图构建和 TEASER++ 粗配准。
+共用的 `registration_*`、`gicp_*` 和 `quality_*` 参数在 `registration_config` 指定的 YAML 中，
+直接 GICP 的历史子图邻域由 `slam_config` 内的 `gicp_submap_half_width` 控制。
+STD + 直接 GICP 会分别尝试 STD 和原始里程计初值，两次使用相同质量门限，
+按包含未匹配点惩罚的最近邻误差选择结果，以减少重复结构下错误局部最优的影响。
+旧 `icp_*` 精配准参数已移除；STD 的 `icp_threshold` 是沿用名称的平面匹配分数门限，不调用 ICP。
+
+两个 `std_teaser_gicp` 命令要求已安装 TEASER++ 并用
+`-DSUPERLIO_WITH_TEASER=ON` 构建。距离模式不生成 STD 描述子；STD 模式要求
+描述子匹配。两种检索都要经过配准验证和 iSAM2 才能形成回环，默认候选两端
+传感器时间差必须严格大于 30 秒，连续接受回环还受关键帧冷却限制。
+
+**关闭回环，仅运行 SuperLIO 前端**
+
+```bash
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  enable_loop_backend:=false use_sim_time:=true rviz:=true
+```
+
+此时不启动回环后端，也不发布 SLAM 关键帧；RViz 自动使用前端配置，
+因此不能沿用前面的 `/lio_slam/keyframe` + `/lio_slam/path` 导出流程。
+
+### 1.2 切换传感器和实验配准配置
+
+上面四种组合也适用于其他传感器入口，仅需替换 launch 文件名：
+
+| 传感器 | launch 文件 |
+| --- | --- |
+| Unitree L1 | `unitree_slam.launch.py` |
+| Velodyne VLP32 / UrbanNav | `vlp32.launch.py` |
+| Livox MID-360 | `Livox_mid360.launch.py` |
+| Robosense Airy | `robosense_airy.launch.py` |
+
+例如 VLP32 使用距离检索和多帧配准：
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_teaser_gicp use_sim_time:=true rviz:=true
+```
+
+默认使用 `config/loop_teaser_gicp.yaml`。如需显式使用 UrbanNav 距离检索的实验配置：
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_teaser_gicp \
+  registration_config:=/home/ros/rosws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/loop_distance_teaser_gicp.yaml \
+  use_sim_time:=true rviz:=true
+```
+
+当前实验文件设置粗内点 RMSE 上限 0.4 m、最少粗内点 30，与默认粗配准参数不同。
+两份配置的 GICP 门限统一为内点 MSE <0.1 m²、源子图和当前帧覆盖率都 >80%。
+它只是可选配准参数，不代表精度已验证；VLP32 数据逐点时间及外参限制见
+[包内 UrbanNav 说明](src/SuperLIO_SLAM/README.md#urbannav-2020-03-14-16-45-35-inspection)。
+使用实时传感器时改为 `use_sim_time:=false`；使用 bag 时保留 `true`，并在回放终端使用 `--clock`。
+
 ## 2. 导出优化后的 PCD 和 TUM 轨迹
 
 导出器读取关键帧消息和最终优化路径，按纳秒时间戳匹配。关键帧点云在 IMU 局部系；脚本用对应的最终 map→IMU 位姿把点云变换到 map 系，并同时写出 TUM 位姿。
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/SLAM_Merge_ws/install/setup.bash
+source /home/ros/rosws/SuperLIO_GLIM_ROS2/install/setup.bash
 ```
 
 ```bash
-python3 /home/ros/ros_ws/SLAM_Merge_ws/tools/export_superlio.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/export_superlio.py \
   --bag /home/ros/dataset/unitree/superlio_results/firstpart_result \
   --out /home/ros/dataset/unitree/superlio_results/firstpart_export
 ```
 
 ```bash
-python3 /home/ros/ros_ws/SLAM_Merge_ws/tools/export_superlio.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/export_superlio.py \
   --bag /home/ros/dataset/unitree/superlio_results/secondpart_result \
   --out /home/ros/dataset/unitree/superlio_results/secondpart_export
 ```
@@ -199,21 +403,21 @@ python3 /home/ros/ros_ws/SLAM_Merge_ws/tools/export_superlio.py \
 `lio2glim.py` 将 map 系 PCD 和位姿切成子图，计算协方差并生成 GLIM `dump`。首次运行会编译 `glim_graph_writer` 辅助程序，需要 `g++`、`GTSAM` 和 `gtsam_points` 开发文件。两段要分别生成 dump：
 
 ```bash
-python3 /home/ros/ros_ws/SLAM_Merge_ws/tools/lio2glim.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
   --poses /home/ros/dataset/unitree/superlio_results/firstpart_export/poses.txt \
   --clouds /home/ros/dataset/unitree/superlio_results/firstpart_export/clouds \
   --out /home/ros/dataset/unitree/superlio_results/firstpart_dump \
   --frames-per-submap 10 --voxel-size 0.2 \
-  --config /home/ros/ros_ws/SLAM_Merge_ws/src/glim/config
+  --config /home/ros/rosws/SuperLIO_GLIM_ROS2/src/glim/config
 ```
 
 ```bash
-python3 /home/ros/ros_ws/SLAM_Merge_ws/tools/lio2glim.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
   --poses /home/ros/dataset/unitree/superlio_results/secondpart_export/poses.txt \
   --clouds /home/ros/dataset/unitree/superlio_results/secondpart_export/clouds \
   --out /home/ros/dataset/unitree/superlio_results/secondpart_dump \
   --frames-per-submap 10 --voxel-size 0.2 \
-  --config /home/ros/ros_ws/SLAM_Merge_ws/src/glim/config
+  --config /home/ros/rosws/SuperLIO_GLIM_ROS2/src/glim/config
 ```
 
 转换完成后，每个 `dump` 都应有 `graph.txt`、`graph.bin`、`values.bin`、`config/` 和按编号排列的子图目录。子图中应有 `data.txt`、`points_compact.bin`、`covs_compact.bin`。不要对已有的非空输出目录直接重跑；改用新的输出目录，或先备份旧目录。
@@ -224,7 +428,7 @@ python3 /home/ros/ros_ws/SLAM_Merge_ws/tools/lio2glim.py \
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/SLAM_Merge_ws/install/setup.bash
+source /home/ros/rosws/SuperLIO_GLIM_ROS2/install/setup.bash
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 ```
 
@@ -258,7 +462,7 @@ ros2 run glim_ros offline_viewer \
 `glim2lio.py` 是 `lio2glim.py` 的逆过程：把 GLIM `dump` 转回通用的「PCD 序列 + TUM 位姿」，便于用其它工具查看、重采样，或经 `lio2glim.py` 再转回 `dump` 形成闭环。子图内点云存的是 origin 系（`T_world_origin^-1 @ p_world`），脚本按 `p_world = T_world_origin @ p_origin` 还原到世界系；`data.txt` 里的逐帧 `T_world_lidar` 已是世界系位姿，直接沿用。
 
 ```bash
-python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
   --dump /home/ros/dataset/unitree/superlio_results/firstpart_dump \
   --out  /home/ros/dataset/unitree/superlio_results/firstpart_reverse
 ```
@@ -278,7 +482,7 @@ python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
 加 `--global-cloud`，会把所有子图按 `T_world_origin` 变换到世界系后拼成一整幅地图，写成 `<out>/merged.pcd`：
 
 ```bash
-python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
   --dump /home/ros/dataset/unitree/superlio_results/firstpart_dump \
   --out  /home/ros/dataset/unitree/superlio_results/firstpart_reverse \
   --global-cloud --global-voxel-size 0.2
@@ -301,11 +505,11 @@ python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/glim2lio.py \
 闭环回 `dump`：把 `clouds/` + `poses.txt` 交给 `lio2glim.py` 即可（两者子图数一致）：
 
 ```bash
-python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
+python3 /home/ros/rosws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
   --poses /home/ros/dataset/unitree/superlio_results/firstpart_reverse/poses.txt \
   --clouds /home/ros/dataset/unitree/superlio_results/firstpart_reverse/clouds \
   --out /tmp/firstpart_round --frames-per-submap 10 --voxel-size 0.2 \
-  --config /home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/glim/config
+  --config /home/ros/rosws/SuperLIO_GLIM_ROS2/src/glim/config
 ```
 
 检查转换是否正确：用 open3d 打开 `merged.pcd`（或任一子图点云），点云应连成整条轨迹，而不是挤成一团；挤成一团说明坐标方向反了。
@@ -314,6 +518,9 @@ python3 /home/ros/ros_ws/SuperLIO_GLIM_ROS2/tools/lio2glim.py \
 
 ## 故障排查
 
+- `Could not find ... teaserppConfig.cmake`：先在工作区根目录执行 `python3 tools/build_teaserpp.py --jobs 1`，再运行 colcon。若依赖安装在其他位置，传入 `-Dteaserpp_DIR=/实际安装位置/lib/cmake/teaserpp`。
+- 构建脚本报找不到 `/home/ros/rosws/src/SuperLIO_SLAM/third_party/TEASER-plusplus`：旧脚本把工作区多向上取了一层。当前 `tools/` 布局应使用 `Path(__file__).resolve().parents[1]`，仓库脚本已修正。
+- `glim_ros` 的 `ament_auto_package` scoped-header 提示只是头文件安装布局警告；该包显示 `Finished` 时，不是本次构建失败原因。
 - `libgtsam_points_cuda.so.1` 报 `undefined symbol ... rekey`：当前终端的 `LD_LIBRARY_PATH` 没有把 `/usr/local/lib` 放在前面。
 - `lio2glim.py` 报找不到 `export_factors.cpp`：确认运行的是本工作区 `tools/lio2glim.py`，且辅助 graph writer 源文件和 GLIM 源码都在仓库中。
 - 优化时报 `xN does not exist in the Values`：对应 `dump` 的 `values.bin` 缺失、无效或不含该子图 pose。检查 `graph.bin`、`values.bin` 是否存在且非空；两个 `session` 的子图数量应与各自 values 中的 X pose 数一致。
@@ -336,7 +543,7 @@ SuperLIO-SLAM 在线建图与回环优化
 TEASER++ 上游源码位于 `src/SuperLIO_SLAM/third_party/TEASER-plusplus`，通过 Git submodule 固定版本。
 克隆后执行 `git submodule update --init --recursive`；具体说明见
 [src/SuperLIO_SLAM/third_party/README.md](src/SuperLIO_SLAM/third_party/README.md)。
-TEASER++ 已接入可选在线模式 `std_teaser_gicp`：单帧 STD 检索 → deque 多帧子图 FPFH → TEASER++ → GICP → iSAM2。默认仍为旧 `std_icp` 模式。构建前执行 `python3 src/tools/build_teaserpp.py --jobs 1`，运行时增加 `loop_registration_mode:=std_teaser_gicp`。详见 [SuperLIO 包说明](src/SuperLIO_SLAM/README.md)。
+TEASER++ 已接入可选在线模式 `std_teaser_gicp`：距离或 STD 检索 → deque 多帧子图 FPFH → TEASER++ → GICP → iSAM2。候选检索默认 `std`，通过严格大于 30 s 的时间差和不超过 15 m 的原始里程计距离筛选后，默认进入 `std_teaser_gicp`；两项模式也可独立切换作对照。构建前执行 `python3 tools/build_teaserpp.py --jobs 1`，默认启动即使用该流程；显式命令为 `loop_candidate_mode:=std loop_registration_mode:=std_teaser_gicp`。详见 [SuperLIO 包说明](src/SuperLIO_SLAM/README.md)。
 
 2026-10-27 整理后，仅 Funny 参考源码和实验结果 `test/`、`savemap/`、`liomap/`
 保留在相邻 `../SuperLIO_GLIM_ROS2_archive_20261027/`，没有删除数据。

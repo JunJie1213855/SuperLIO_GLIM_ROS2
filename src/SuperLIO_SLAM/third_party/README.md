@@ -11,7 +11,7 @@ TEASER++ 是固定版本的子模块，当前已经通过独立 CMake 安装链�
 
 ```bash
 git submodule update --init --recursive
-python3 src/tools/build_teaserpp.py --jobs 1
+python3 tools/build_teaserpp.py --jobs 1
 ```
 
 脚本固定 PMC、tinyply、Spectra 提交，保留在 `build/teaserpp_vendor`。缓存齐全后可加 `--offline`，缺少依赖或提交/工作树不符则报错，不覆盖已有修改。构建产物位于 `build/teaserpp`，安装至 `install/teaserpp`，不用 sudo。

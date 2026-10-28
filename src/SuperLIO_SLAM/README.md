@@ -3,24 +3,60 @@
 This ROS 2 package contains a local copy of Super-LIO, its `basic` code, and STD. The online pipeline is:
 
 1. Super-LIO processes LiDAR and IMU data and publishes selected keyframes after its normal observation update.
-2. The backend extracts STD descriptors and searches earlier keyframes for a loop candidate.
-3. ICP aligns the current keyframe with the candidate's local submap. Convergence, overlap, fitness, and correction limits gate the result.
-4. Accepted ICP relative poses become robust loop factors in an iSAM2 pose graph. The backend publishes the corrected trajectory and map.
+2. The backend retrieves earlier keyframes using STD descriptors (default) or raw-odometry distance, then checks both sensor-time separation and raw-odometry distance.
+3. An asynchronous worker verifies candidates with multi-frame FPFH / TEASER++ / GICP (default), or direct GICP for comparison. Registration quality gates decide whether to accept the relative pose.
+4. Accepted relative poses become robust loop factors in an iSAM2 pose graph. The backend publishes the corrected trajectory and rebuilds the map in a separate worker.
 
-ICP supplies a pose-graph observation; it does not alter the front-end ESKF state. The front end continues publishing `world → imu`, and the backend publishes `map → world`, so TF consumers can obtain the corrected `map → imu` pose.
+GICP supplies a pose-graph observation; it does not alter the front-end ESKF state. The front end continues publishing `world → imu`, and the backend publishes `map → world`, so TF consumers can obtain the corrected `map → imu` pose.
 
 ## Build and run
 
-Source ROS 2 Humble and the workspace containing `livox_ros_driver2`, then build this package:
+Run the following from the workspace root, not from this package directory. These paths match the local WSL Ubuntu 22.04 / ROS 2 Humble setup; adjust the workspace and Livox paths on another machine.
+
+TEASER++ is enabled at build time by default (`SUPERLIO_WITH_TEASER=ON`); the default runtime pipeline is `loop_candidate_mode:=std loop_registration_mode:=std_teaser_gicp`. Initialize its source submodule and build/install the dependency before running colcon:
 
 ```bash
+cd /home/ros/rosws/SuperLIO_GLIM_ROS2
 source /opt/ros/humble/setup.bash
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
 git submodule update --init --recursive
-python3 src/tools/build_teaserpp.py --jobs 1
-colcon build --packages-select super_lio_slam --symlink-install
+python3 tools/build_teaserpp.py --jobs 1
+MAKEFLAGS=-j1 colcon build --packages-select super_lio_slam --symlink-install \
+  --executor sequential --cmake-args \
+  -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM \
+  -DSUPERLIO_WITH_TEASER=ON -DBUILD_TESTING=ON
 source install/setup.bash
 ros2 launch super_lio_slam slam.launch.py
 ```
+
+The helper is `tools/build_teaserpp.py`, not `src/tools/build_teaserpp.py`. It resolves this workspace from its location, pins TEASER++ and its transitive sources, builds under `build/teaserpp`, and installs under `install/teaserpp` without sudo. The generated package configuration is `install/teaserpp/lib/cmake/teaserpp/teaserppConfig.cmake`; this package's CMake already searches that installation prefix. Source code alone does not provide the installed configuration.
+
+For a build with only the existing GICP registration path, skip the TEASER++ helper and use:
+
+```bash
+MAKEFLAGS=-j1 colcon build --packages-select super_lio_slam --symlink-install \
+  --executor sequential --cmake-args \
+  -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM -DSUPERLIO_WITH_TEASER=OFF
+source install/setup.bash
+```
+
+That build requires launching with `loop_registration_mode:=std_gicp`; the default `std_teaser_gicp` mode fails explicitly at startup without TEASER++. To enable the new mode later, build the dependency and rebuild with `-DSUPERLIO_WITH_TEASER=ON` explicitly, since CMake caches the option.
+
+### Build troubleshooting
+
+- `Could not find ... teaserppConfig.cmake`: run `python3 tools/build_teaserpp.py --jobs 1` from the workspace root before colcon. For another TEASER++ installation, pass `-Dteaserpp_DIR=/absolute/path/to/lib/cmake/teaserpp` in the colcon CMake arguments.
+- `fatal: cannot change to '/home/ros/rosws/src/SuperLIO_SLAM/third_party/TEASER-plusplus'`: an older helper resolved one directory too high. In the current `tools/` layout it must use `Path(__file__).resolve().parents[1]` for the workspace root.
+- Use `--offline` only after all three pinned dependency checkouts exist under `build/teaserpp_vendor`. An initial build requires network access to fetch them.
+- The `glim_ros` scoped-header message from `ament_auto_package` is an installation-layout warning, not the TEASER++ configuration failure.
+
+For direct executable tests, source the workspaces above, then prepend the build-compatible libraries while preserving the ROS library paths:
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/lib:/home/ros/rosws/SuperLIO_GLIM_ROS2/install/teaserpp/lib:${LD_LIBRARY_PATH:-}
+ctest --test-dir build/super_lio_slam -R submap_registration_test --output-on-failure
+```
+
+The shared SLAM launch applies the recorded GTSAM/TEASER++ library directories to the backend process automatically; see [GTSAM runtime isolation](#gtsam-runtime-isolation).
 
 The SLAM launch defaults to `config/livox_360.yaml` for the sensor/front end and `config/slam.yaml` for keyframes and the backend. Select another copied sensor configuration with `sensor_config:=/absolute/path/to/config.yaml`. Add `rviz:=true` to start RViz.
 
@@ -77,27 +113,30 @@ All mapping launch profiles now include the shared `slam.launch.py` pipeline wit
 
 The SLAM RViz view draws the latest keyframe's STD triangles in cyan with yellow vertices. Set `std_visualization_max_triangles` in `config/slam.yaml` to limit clutter, or set it to `0` to hide them. The markers use corrected `map` coordinates and replace the previous keyframe's triangles.
 
-`config/slam.yaml` contains all keyframe, STD, ICP, graph, and map parameters. `icp_fitness_threshold` is the mean squared correspondence error in square metres. `map_max_keyframes` limits the number of keyframes used when rebuilding a published map; set it to `0` for the full accumulated trajectory. `map_max_points_per_keyframe` bounds map publication cost independently of the stored registration clouds.
+`config/slam.yaml` contains keyframe, STD, graph, map and direct-GICP target-window settings. Shared registration parameters are loaded from `registration_config` (default `config/loop_teaser_gicp.yaml`); `quality_max_inlier_mse_m2` limits independent nearest-neighbor inlier MSE in square metres. `map_max_keyframes` limits the number of keyframes used when rebuilding a published map; set it to `0` for the full accumulated trajectory. `map_max_points_per_keyframe` bounds map publication cost independently of the stored registration clouds.
 
-Each backend keyframe emits a `Loop search` summary (set `loop_diagnostic_stride: 0` to disable it, or increase the stride to reduce output). `stage` identifies the first failed gate: `few_corners`/`no_triangles`/`few_planes` for extraction; `no_hash_candidates`, `near_frames_only`, `side_length_rejected`, `vertex_rejected` for STD rough matching; `few_pairs_per_frame` for the minimum five pairs; `triangle_vote_rejected` for fewer than four consistent triangles; and `plane_score_rejected` for a plane score below `icp_threshold`. The summary includes counts at each filter, the strongest verified candidate, and active thresholds. `best` is the dense backend keyframe index, while `input` is the incoming keyframe ID. When STD passes, `ICP history -> current rejected` gives the fitness, correction, overlap, or point-count gate and its limit. A candidate must be more than `skip_near_num` backend keyframes old; both current Robosense and Unitree configurations use 10. A visual revisit alone does not prove that STD can form a valid candidate; these logs locate the rejection stage before tuning thresholds.
+Normal logs report registration decisions, plus stage timings throttled to 5 seconds; the old per-keyframe `Loop search` summary is no longer emitted. `loop_diagnostic_stride` remains a compatibility parameter. In STD retrieval mode, candidates must be more than `skip_near_num` backend keyframes old (10 in the current configs). Both retrieval modes also require a sensor-stamp gap strictly greater than `loop_min_time_separation_s` (30 seconds by default). `Distance candidate` means verification has started; `STD ... matched` means a retrieved candidate passed the time/distance gates; only `Loop ... accepted` means a factor was added. Registration rejection reasons identify the failed quality gate.
 
-On the Robosense `mapping/` bag (98 seconds, 50 backend keyframes), the previous configuration produced zero triangles on 44 frames and only 1–4 triangles on the other six. Its `skip_near_num: 50` excluded every historical frame. With `slam.keyframe.voxel_leaf: 0.2`, `keyframe_cloud_voxel_size: 0.2`, `corner_thre: 2.0`, and `skip_near_num: 10`, a full replay generated roughly 300–600 triangles per frame and accepted loop 24 → 38 (STD score 0.807, ICP fitness 0.064, overlap 1.00). These tested settings are now the Robosense defaults in `config/slam.yaml`; Unitree retains its separate configuration.
+Historical STD/ICP Robosense replay results predate the GICP migration and are
+not a validation of the current direct-GICP path. See the archived validation
+reports for those measurements; current results must be measured with the selected
+registration mode and its shared quality gates.
 
-For an initial check, inspect `/lio_slam/keyframe`, `/lio_slam/path`, and the `map → world → imu` TF chain while replaying a bag that revisits a place. A candidate becomes a graph factor only after the ICP gates pass; compare the corrected path and map with the front-end path after a completed loop.
+For an initial check, inspect `/lio_slam/keyframe`, `/lio_slam/path`, and the `map → world → imu` TF chain while replaying a bag that revisits a place. A candidate becomes a graph factor only after the GICP gates pass; compare the corrected path and map with the front-end path after a completed loop.
 
-The included ROS smoke test publishes five keyframes to the actual backend process. It checks a stationary revisit, a translated and rotated revisit, and an ICP rejection:
+The included ROS smoke test publishes five keyframes to the actual backend process. It checks a stationary revisit, a translated and rotated revisit, and a GICP rejection:
 
 ```bash
 python3 src/SuperLIO_SLAM/test/online_loop_smoke.py --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node
 python3 src/SuperLIO_SLAM/test/online_loop_smoke.py --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node --moving
-python3 src/SuperLIO_SLAM/test/online_loop_smoke.py --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node --reject-icp
+python3 src/SuperLIO_SLAM/test/online_loop_smoke.py --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node --reject-registration
 ```
 
 Run these from the workspace root after sourcing `install/setup.bash`. `--pcd /absolute/path/to/binary_float32.pcd` tests with an existing XYZI scene; it repeats the same scene under known poses rather than replaying a sensor bag.
 
 ## Multi-frame STD / TEASER++ / GICP / iSAM2 backend
 
-The optional `std_teaser_gicp` mode is implemented. The default remains `std_icp` for baseline comparison. STD still extracts descriptors from individual keyframes. Raw STD candidates enter multi-frame registration before the legacy triangle-vote/plane-score pose gates.
+The default pipeline is `loop_candidate_mode:=std` with `loop_registration_mode:=std_teaser_gicp`. STD extracts descriptors from individual keyframes and retrieves historical candidates. Candidates must pass the strict sensor-time and raw-odometry distance gates before submap registration. A triangle-consistent STD pose can supply an optional hint, but a missing hint does not reject a candidate. Neither STD triangle votes nor its legacy plane score is a hard admission gate in this mode. Direct `std_gicp` and distance retrieval remain available as comparison modes.
 
 A `std::deque` retains at most four current keyframes, bounded by six seconds and six metres of cumulative travel. Each cloud is transformed with `O_current.inverse() * O_neighbor`; the current keyframe is the identity in that local coordinate system. Historical causal windows use the same rules and retain their own historical centre as the identity. Windows sharing any frame are rejected. Stored single-frame clouds are retained for map reconstruction and GLIM export.
 
@@ -108,22 +147,24 @@ Validation checks include unique correspondence count and spatial spread, coarse
 Build TEASER++ first using the workspace helper; its PMC, tinyply and Spectra sources are pinned, and are cached under `build/teaserpp_vendor`. A populated cache supports `--offline`:
 
 ```bash
-git submodule update --init --recursive
-python3 src/tools/build_teaserpp.py --jobs 1
+cd /home/ros/rosws/SuperLIO_GLIM_ROS2
 source /opt/ros/humble/setup.bash
-# Also source the workspace providing livox_ros_driver2.
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
+git submodule update --init --recursive
+python3 tools/build_teaserpp.py --jobs 1
 MAKEFLAGS=-j1 colcon build --base-paths src --packages-select super_lio_slam --symlink-install \
-  --cmake-args -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM -DBUILD_TESTING=ON
+  --executor sequential --cmake-args -DGTSAM_DIR=/usr/local/lib/cmake/GTSAM \
+  -DSUPERLIO_WITH_TEASER=ON -DBUILD_TESTING=ON
 source install/setup.bash
 ros2 launch super_lio_slam unitree_slam.launch.py \
   loop_registration_mode:=std_teaser_gicp use_sim_time:=true rviz:=true
 ```
 
-The same mode argument is supported by `slam.launch.py` and `robo_slam.launch.py`. `registration_config` defaults to [config/loop_teaser_gicp.yaml](config/loop_teaser_gicp.yaml); override that argument to tune the new mode. Existing STD age/cooldown and iSAM2 noise parameters still come from the sensor SLAM YAML. Switching to `loop_registration_mode:=std_icp` restores the old registration path. To build without TEASER++, use `-DSUPERLIO_WITH_TEASER=OFF`; attempting the new mode then fails explicitly at startup.
+The same mode argument is supported by `slam.launch.py` and `robo_slam.launch.py`. `registration_config` defaults to [config/loop_teaser_gicp.yaml](config/loop_teaser_gicp.yaml); override that argument to tune the new mode. Existing STD age/cooldown and iSAM2 noise parameters still come from the sensor SLAM YAML. Switching to `loop_registration_mode:=std_gicp` uses direct GICP with the retrieved relative pose as its initial guess. To build without TEASER++, use `-DSUPERLIO_WITH_TEASER=OFF`; attempting the new mode then fails explicitly at startup.
 
-Both registration modes now use an asynchronous registration worker and a separate map worker. STD generation, candidate verification and descriptor insertion stay sequential in the keyframe callback; each valid ingested keyframe is retained and gets an odometry graph node. Registration consumes immutable cloud/pose snapshots. `registration_queue_capacity` (default 2) bounds pending detection tasks; overload evicts the oldest pending task, never its keyframe or graph node. A running solver is not interrupted. Late constraints connect existing graph nodes and refresh the latest pose/path/correction, rather than publishing the old task frame as current. iSAM2 updates are serialized by a shared graph mutex, so graph optimization can briefly delay ingress. Map requests coalesce to the newest pending pose snapshot, with one reconstruction in progress. Historical feature caching and incremental map reconstruction are not implemented.
+Both GICP registration modes use an asynchronous registration worker and a separate map worker. STD generation, candidate verification and descriptor insertion stay sequential in the keyframe callback; each valid ingested keyframe is retained and gets an odometry graph node. Registration consumes immutable cloud/pose snapshots. `registration_queue_capacity` (default 2) bounds pending detection tasks; overload evicts the oldest pending task, never its keyframe or graph node. A running solver is not interrupted. Late constraints connect existing graph nodes and refresh the latest pose/path/correction, rather than publishing the old task frame as current. iSAM2 updates are serialized by a shared graph mutex, so graph optimization can briefly delay ingress. Map requests coalesce to the newest pending pose snapshot, with one reconstruction in progress. Historical feature caching and incremental map reconstruction are not implemented.
 
-Normal logs report STD triangle matches and registration quality decisions, plus throttled (5 s) stage timing: cloud filtering, descriptor generation, search/verification/insertion, ingestion and sensor-stamp age, registration queue wait/work and map rebuild. Queue eviction counts are also throttled. A coarse candidate must pass inlier count/fraction, geometry and `coarse_max_inlier_rmse_m` (default 0.3 m); this residual is not ground-truth pose accuracy. Fine registration retains its coverage/MSE and observability gates. Search details/retries use DEBUG. The soft registration budget prevents starting additional candidates; it does not interrupt a running solver.
+Normal logs report STD candidates passing the time/distance gates and registration quality decisions, plus throttled (5 s) stage timing: cloud filtering, descriptor generation, search/verification/insertion, ingestion and sensor-stamp age, registration queue wait/work and map rebuild. Queue eviction counts are also throttled. A coarse candidate must pass inlier count/fraction, geometry and `coarse_max_inlier_rmse_m` (default 0.3 m); this residual is not ground-truth pose accuracy. Fine registration retains its coverage/MSE and observability gates. Search details/retries use DEBUG. The soft registration budget prevents starting additional candidates; it does not interrupt a running solver.
 
 The asynchronous overload integration test is `test/async_backend_smoke.py --backend <loop_backend_node>`. It publishes a burst, verifies every input is retained in the graph, checks bounded task eviction, delayed-loop publication at the latest frame and asynchronous map output. Use a private ROS domain when running tests.
 
@@ -132,19 +173,59 @@ Tests after building:
 ```bash
 ctest --test-dir build/super_lio_slam -R submap_registration_test --output-on-failure
 python3 src/SuperLIO_SLAM/test/online_loop_smoke.py \
-  --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node --mode std_teaser_gicp
-# Nonzero rotation with stronger local drift: use a shorter calibrated test window.
+  --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node \
+  --candidate-mode distance --mode std_teaser_gicp \
+  --submap-frames 2 --coarse-inlier-ratio 0.2 --coarse-max-rmse 0.35
+# Historical STD rotation experiment; uses explicit synthetic-test thresholds.
 python3 src/SuperLIO_SLAM/test/online_loop_smoke.py \
   --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node \
-  --mode std_teaser_gicp --moving --submap-frames 2 --coarse-inlier-ratio 0.2
-# Repeat with --reject-icp (the flag forces registration rejection in either mode).
+  --candidate-mode std --mode std_teaser_gicp --moving \
+  --submap-frames 2 --coarse-inlier-ratio 0.2 --coarse-max-rmse 0.35
+# Repeat with --reject-registration (the flag forces registration rejection in either mode).
 ```
 
 Runtime parameters are experimental until validated on the deployment sensor. The design [plan](../../docs/loop_std_teaser_gicp_isam2_plan.md) and [mathematical derivation](../../docs/loop_submap_registration_math.md) explain the coordinate contract. The proposed YAML in docs is a design sketch and contains parameters not implemented by this version; use the runtime YAML above.
 
 ### Validation and limitations
 
-The synthetic nonzero-rotation stress scene introduces 0.25 m translation drift and 0.02 rad yaw drift per keyframe. With a four-frame window the accumulated cloud is internally distorted and the default coarse inlier gate rejects it; this default stress case is not a passing test. The two-frame / 0.2-inlier-ratio experiment above passes without changing the deployed defaults. This is evidence for window/noise calibration, not a reason to relax all deployment gates. See the [recorded validation results](../../docs/loop_registration_validation.md) for exact configurations and real-bag coverage. No absolute accuracy improvement is claimed without ground truth.
+The synthetic nonzero-rotation stress scene introduces 0.25 m translation drift and 0.02 rad yaw drift per keyframe. With a four-frame window the accumulated cloud is internally distorted and the default coarse inlier gate rejects it; this default stress case is not a passing test. The historical passing experiment uses two frames, a 0.2 inlier ratio and a 0.35 m coarse RMSE limit, as shown above; these are explicit test overrides and do not change deployed defaults. See the [recorded validation results](../../docs/loop_registration_validation.md) for exact configurations and real-bag coverage. No absolute accuracy improvement is claimed without ground truth.
+
+Earlier build verification on 2026-10-28, before the GICP/default-pipeline migration: TEASER++ built and installed, `super_lio_slam` built with TEASER++ enabled, and `submap_registration_test` passed (1/1). The launch argument listing also loaded successfully. An additional online synthetic run with distance retrieval and the default four-frame / 0.3 inlier-ratio / 0.3 m RMSE settings rejected its candidate (`few_coarse_inliers`, 24/200) and failed the test's expected-loop assertion; successful compilation does not imply that this fixture passes with runtime defaults. Two subsequent runs with the two-frame / 0.2 / 0.35 m overrides timed out during ROS publisher/subscriber discovery (`Backend subscription unavailable`), including a retry in a different ROS domain; they did not reach registration, so that earlier run did not establish a passing two-frame online test. No full-bag accuracy evaluation was run in this verification.
+
+### GICP and default-pipeline migration verification (2026-10-28)
+
+The package build and `submap_registration_test` passed (1/1), including direct
+GICP with an imperfect initial pose, transform direction, invalid-hint rejection,
+sparse-input rejection, quality rejection and planar degeneracy. Online synthetic
+checks used the installed `rmw_cyclonedds_cpp` middleware and separate ROS domains:
+
+| Check | Result |
+| --- | --- |
+| STD -> time/radius -> TEASER++ -> GICP, default registration quality thresholds | Passed; synthetic 1 m drift reduced to about 0.0099 m |
+| STD candidate beyond the configured radius | Passed; no loop factor, original drift retained |
+| STD candidate exactly 30 sensor seconds apart | Passed; no loop factor, original drift retained |
+| STD + direct GICP, nonzero translation / 90-degree revisit | Passed; synthetic 1 m drift reduced to about 0.0105 m |
+
+The default-quality positive check used `--timestamp-step 10
+--loop-min-time-separation 30`. Ten-second spacing trims the six-second causal
+window to one frame; this is acceptance-pipeline coverage, not evidence that the
+four-frame accumulated-drift stress fixture or a real sensor bag passes. Earlier
+four-frame fixture failures remain documented above. No ground-truth ATE/RPE or
+real-bag accuracy evaluation was performed in this migration.
+
+To reproduce the default-quality acceptance check after sourcing the workspaces
+and setting the direct-executable library path as above:
+
+```bash
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ROS_DOMAIN_ID=188 ROS_LOCALHOST_ONLY=1   python3 src/SuperLIO_SLAM/test/online_loop_smoke.py   --backend install/super_lio_slam/lib/super_lio_slam/loop_backend_node   --candidate-mode std --mode std_teaser_gicp   --loop-min-time-separation 30 --timestamp-step 10
+```
+
+The final strict-quality update uses inlier MSE <0.1 m² and source/current
+coverage >0.8 in both registration profiles and both GICP paths. Package build,
+CTest (1/1), the default-quality STD/TEASER++/GICP synthetic positive and the
+rotated STD/direct-GICP positive passed again. Boundary tests reject MSE equal to
+its upper bound, source coverage exactly 80%, and current-frame coverage exactly
+80%; the MSE test also accepts the immediately lower adjacent floating-point value.
 
 ## Unified launch arguments
 
@@ -156,7 +237,9 @@ All mapping profiles, including the legacy `M2DGR.py`, `MCD_ATH.py` and `NCLT.py
 | `slam_config` | `slam.yaml`, or `unitree_slam.yaml` for Unitree |
 | `registration_config` | `loop_teaser_gicp.yaml` |
 | `enable_loop_backend` | `true`; `false` also disables front-end keyframe publication |
-| `loop_registration_mode` | `std_icp`; choose `std_teaser_gicp` for the new multi-frame mode |
+| `loop_candidate_mode` | `std`; choose `distance` for a proximity-retrieval comparison |
+| `loop_candidate_radius_m` | `15.0`; raw-odometry distance gate for both retrieval modes |
+| `loop_registration_mode` | `std_teaser_gicp`; choose `std_gicp` for direct GICP |
 | `use_sim_time` | `false`; applied to front end, backend and RViz |
 | `rviz` | `false` in the generic launch; `true` in sensor profiles |
 | `rviz_config` | `slam.rviz` with backend, `lio.rviz` in front-end-only mode |
@@ -173,6 +256,134 @@ ros2 launch super_lio_slam robosense_airy.launch.py enable_loop_backend:=false
 Relocation accepts `sensor_config`, `use_sim_time`, `rviz`, `rviz_config` and logging arguments, and does not start a loop backend. Standalone STD extraction accepts `std_config`, `input_topic`, `output_dir`, a typed integer `max_visualized_descriptors`, `use_sim_time` and `log_level`. The copied entry in `std/ros2/launch` delegates to the installed `super_lio_slam` utility instead of referring to a separate `std_detector` package.
 
 GLIM in this workspace has no Python launch files; its existing Offline Viewer entry point is unchanged.
+
+## Commands for each loop mode
+
+The default acceptance pipeline is:
+
+```text
+STD candidates -> sensor-time gap > 30 s AND raw-odometry distance <= 15 m
+  -> FPFH + TEASER++ coarse registration -> coarse inlier count/ratio/RMSE gates
+  -> GICP refinement -> independent NN distance/MSE/coverage and geometry gates
+  -> robust loop factor in iSAM2 -> corrected path and map
+```
+
+The time and radius gates are checked after retrieval, before worker registration,
+and again before committing a delayed constraint. Distances use raw LIO poses on
+both sides. The default coarse inlier radius is 0.6 m, with at least 6 inliers,
+inlier ratio at least 0.3 and inlier RMSE at most 0.3 m. GICP uses 2 m solver
+correspondences, a 1 m independent quality radius, inlier MSE strictly below 0.1 m²,
+source/current coverage both strictly above 0.8, and at least 100 inliers. Refinement limits
+are 5 m / 20 degrees, with information-ratio floor `1e-5`; convergence, valid rigid
+transforms, non-overlapping submap members and the loop cooldown are also required.
+RMSE in metres and MSE in square metres are different geometric metrics.
+Equality at 0.1 m² MSE or 80% coverage is rejected. No separate score-above-0.8
+condition is used. PCL's `getFitnessScore()` is a mean squared distance, so lower
+is better; it is not a normalized 0–1 confidence. Our independent inlier MSE
+averages squared nearest-neighbor distances inside `quality_nn_radius_m`;
+coverage divides that inlier count by the source/current cloud size respectively.
+
+
+
+Candidate retrieval and registration are independent. `std_gicp` and `std_teaser_gicp`
+name the registration paths; either can use distance or STD retrieval.
+
+| Pipeline | `loop_candidate_mode` | `loop_registration_mode` |
+| --- | --- | --- |
+| Distance + GICP (comparison) | `distance` | `std_gicp` |
+| STD + GICP | `std` | `std_gicp` |
+| Distance + multi-frame TEASER++ / GICP | `distance` | `std_teaser_gicp` |
+| STD + multi-frame TEASER++ / GICP (default) | `std` | `std_teaser_gicp` |
+
+Load the environment in each launch terminal:
+
+```bash
+cd /home/ros/rosws/SuperLIO_GLIM_ROS2
+source /opt/ros/humble/setup.bash
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
+source install/setup.bash
+```
+
+Choose one command below. These examples use Unitree L1 bag playback. Stop the
+current launch before switching modes; no rebuild is needed to switch among all
+four combinations when the package was built with `SUPERLIO_WITH_TEASER=ON`.
+
+```bash
+# Distance retrieval + direct GICP: comparison mode.
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_gicp use_sim_time:=true rviz:=true
+
+# STD retrieval + GICP.
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=std loop_registration_mode:=std_gicp \
+  use_sim_time:=true rviz:=true
+
+# Distance retrieval + multi-frame TEASER++ / GICP.
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_teaser_gicp use_sim_time:=true rviz:=true
+
+# STD retrieval + multi-frame TEASER++ / GICP.
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_candidate_mode:=std loop_registration_mode:=std_teaser_gicp \
+  use_sim_time:=true rviz:=true
+```
+
+The old `std_icp` loop mode is removed; use `std_gicp` for direct refinement.
+Both modes call the same GICP solver and apply the same overlap, inlier-MSE,
+refinement-limit and geometry-degeneracy gates. Direct GICP aligns the current
+frame to a historical local submap. With STD retrieval it tries both the STD
+pose proposal and the continuous raw-odometry relative pose, applies identical
+quality gates to both, and selects the smaller overlap-weighted nearest-neighbor
+error (unmatched points receive the squared quality-radius penalty);
+`std_teaser_gicp` adds multi-frame source/target windows and TEASER++ coarse registration.
+
+Shared `registration_*`, `gicp_*` and `quality_*` settings come from
+`registration_config`. `gicp_submap_half_width` in the SLAM YAML controls the direct
+mode's historical neighborhood. Old `icp_*` fine-registration parameters are
+removed. The STD library's `icp_threshold` name is retained for its plane-match
+score threshold; it does not invoke an ICP solver.
+
+The two TEASER++ / GICP commands require the dependency installation and an
+`-DSUPERLIO_WITH_TEASER=ON` build. Both retrieval modes retain the strict sensor-time
+gap greater than 30 seconds and the accepted-loop keyframe cooldown. Distance
+retrieval skips STD extraction; spatial proximity still requires registration
+verification before a loop factor is inserted.
+
+For front-end-only mapping:
+
+```bash
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  enable_loop_backend:=false use_sim_time:=true rviz:=true
+```
+
+This disables both the loop node and keyframe publication, and selects the front-end
+RViz view. The `/lio_slam/keyframe` + `/lio_slam/path` export workflow requires the
+backend to be enabled.
+
+For VLP32 / UrbanNav, replace `unitree_slam.launch.py` with `vlp32.launch.py` in
+any combination. Livox MID-360 uses `Livox_mid360.launch.py`; Robosense Airy uses
+`robosense_airy.launch.py`. To select the optional distance-registration trial
+profile explicitly:
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py \
+  loop_candidate_mode:=distance loop_candidate_radius_m:=15.0 \
+  loop_registration_mode:=std_teaser_gicp \
+  registration_config:=/home/ros/rosws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/loop_distance_teaser_gicp.yaml \
+  use_sim_time:=true rviz:=true
+```
+
+The default profile remains `loop_teaser_gicp.yaml`. The current trial file uses
+coarse RMSE limit 0.4 m and at least 30 coarse inliers. Both profiles share the
+same strict GICP gates: source/current overlap >0.8 and inlier MSE <0.1 m². The
+coarse settings differ from the default and are not an accuracy guarantee. See the UrbanNav data limitations below.
+For bag playback use `ros2 bag play ... --clock` in another sourced terminal;
+for live sensors use `use_sim_time:=false`.
+
+Chinese commands and the recording/export sequence are in the
+[workspace README](../../README.md#11-不同回环方式的启动命令).
 
 ## GTSAM runtime isolation
 
@@ -206,10 +417,11 @@ message stamps, independently of playback rate or worker queue delay; the existi
 `loop_min_interval` keyframe cooldown still applies. Synthetic scheduling smoke
 tests explicitly override the separation to zero; temporal boundary tests use 30.
 
-Candidate retrieval defaults to spatial proximity for troubleshooting:
+Spatial-proximity retrieval remains available for troubleshooting:
 `loop_candidate_mode:=distance loop_candidate_radius_m:=15.0`. It searches raw LIO
 positions, keeps the strict >30 sensor-second separation, skips STD descriptors,
 and passes the raw relative pose as the registration prior. The same TEASER/GICP
-quality gates still apply. Use `loop_candidate_mode:=std` to restore STD retrieval.
-Both arguments are inherited by sensor launch profiles. Distance alone never
+quality gates still apply. Use `loop_candidate_mode:=std` for the default STD retrieval.
+Both arguments are inherited by sensor launch profiles. The default is STD retrieval
+followed by the same raw-odometry radius gate, then TEASER++ and GICP. Distance alone never
 creates a loop edge; large odometry drift beyond the radius can hide true revisits.
