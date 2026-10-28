@@ -147,6 +147,7 @@ bool SuperLIOReLoc::kf_init(){
     return false;
   }
 
+  // 获取当前测量点云
   CloudPtr point_cloud_pcl = CloudPtr(new PointCloudType());
   for(std::size_t i = 0; i < measures_.lidar.pc->size(); i++){
     auto p = measures_.lidar.pc->points[i];
@@ -158,27 +159,32 @@ bool SuperLIOReLoc::kf_init(){
     point_cloud_pcl->points.push_back(point);
   }
 
+  // 点云累积
   if(init_frame_count < need_init_frames){
     *init_obs_data_ += *point_cloud_pcl;
   }
   init_frame_count++;
 
+  // imu 样本累积
   for(auto& imu: measures_.imu){
     imu_cout ++;
     mean_gyro += (imu.gyr - mean_gyro) / imu_cout;
     mean_acce += (imu.acc - mean_acce) / imu_cout;
   }
 
+  // imu 样本样大于 20 才能继续重定位
   if(imu_cout < 20){
     return false;
   }
 
+  // 必须要大于所需要的点云帧数才可以初始化
   if(init_frame_count < need_init_frames){
     return false;
   }
 
   LOG(INFO) << YELLOW << " ---> INIT start... obs_data size: " << init_obs_data_->size() << " target size: " << point_map_->size() << RESET;
 
+  // 重力初始化
   V3 gravity = - mean_acce * g_gravity_norm / mean_acce.norm();
   V3 ref_gravity(0, 0, - g_gravity_norm);
   M3 init_rot = Quat::FromTwoVectors(gravity, ref_gravity).toRotationMatrix();
@@ -198,6 +204,7 @@ bool SuperLIOReLoc::kf_init(){
   pcl::PointCloud<pcl::PointXYZI>::Ptr tmp_src(new pcl::PointCloud<pcl::PointXYZI>());
   pcl::transformPointCloud(*init_obs_data_, *tmp_src, g_lidar_imu.matrix().cast<float>());
 
+  // ndt 粗配准
   pcl::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt;
   ndt.setTransformationEpsilon(1e-4);
   ndt.setEuclideanFitnessEpsilon(1e-4);
@@ -205,6 +212,7 @@ bool SuperLIOReLoc::kf_init(){
   ndt.setResolution(1.0);
   ndt.setInputTarget(point_map_);
 
+  // icp 精配准
   pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
   icp.setMaxCorrespondenceDistance(4.0);
   icp.setMaximumIterations(40);
@@ -238,6 +246,7 @@ bool SuperLIOReLoc::kf_init(){
 
   LOG(INFO) << GREEN << "\n" << init_guess_T << RESET;
 
+  // 初始化 kf
   ESKF::Options options;
   options.gyro_var_ = g_imu_ng;
   options.acce_var_ = g_imu_na;
@@ -249,6 +258,8 @@ bool SuperLIOReLoc::kf_init(){
   float imu_scale = g_gravity_norm / mean_acce.norm();
   kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), imu_scale, ref_gravity);
   auto state = kf_->GetSysState();
+  
+  // 用 icp 精配准的位姿 init_guess_T 进行初始化
   /// The horizontal initial state of the imu in the robot coordinate system.
   state.R = SO3(init_guess_T.block<3, 3>(0, 0));
   state.p = init_guess_T.block<3, 1>(0, 3);
