@@ -1,6 +1,6 @@
 # SuperLIO SLAM
 
-ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。GLIM 多会话导出和合并流程见[工作区 README](../../README.md)。
+ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。完整运行命令见 [Quickstart](../../docs/quickstart.md)，项目概览见[工作区 README](../../README.md)。
 
 ## 当前实现
 
@@ -16,9 +16,9 @@ ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。GLIM 多�
 在工作区根目录执行：
 
 ```bash
-cd /home/ros/rosws/SuperLIO_GLIM_ROS2
+cd /home/ros/ros_ws/SuperLIO_GLIM_ROS2
 source /opt/ros/humble/setup.bash
-source /home/ros/rosws/livox_ros_ws/install/setup.bash
+source /home/ros/ros_ws/livox_ros/install/setup.bash
 git submodule update --init --recursive
 python3 tools/build_teaserpp.py --jobs 1
 
@@ -60,6 +60,9 @@ ros2 bag play /mnt/d/dataset/SLAM/robosense/mapping
 | `loop_candidate_radius_m` | 两种候选模式的原始里程计距离门限，默认 15 m |
 | `use_sim_time` | 默认 false；需要 ROS 仿真时间时仍可与播放器 `--clock` 配套使用 |
 | `rviz` / `rviz_config` | 是否启动及显示配置；关闭后端时自动选择 `lio.rviz` |
+| `save_map_path` | 服务与退出保存的优化地图 PCD 路径 |
+| `save_map_voxel_size` | 保存体素大小，默认 0.2 m；0 逐点流式写入 |
+| `save_map_on_shutdown` | 正常退出自动保存；默认 false |
 
 ### 四种回环组合
 
@@ -82,7 +85,7 @@ ros2 launch super_lio_slam unitree_slam.launch.py \
 两种检索均要求传感器时间差 **>30 s**、原始里程计距离 **≤15 m**；
 还受关键帧冷却及源/目标子图不共享成员的限制。
 
-STD 位姿提示是可选初值，提示失败后可重试无提示粗配准。源/目标子图分别在锚帧下按位姿累积，GICP 返回将当前帧点变换到历史帧的完整相对变换供 iSAM2 使用；坐标方向见[配准推导](../../docs/loop_submap_registration_math.md)。
+STD 位姿提示是可选初值，提示失败后可重试无提示粗配准。源/目标子图分别在锚帧下按位姿累积，GICP 返回将当前帧点变换到历史帧的完整相对变换供 iSAM2 使用；坐标方向见[配准推导](../../docs/loop_pgo_path.md)。
 
 ### 配准门限
 
@@ -112,7 +115,7 @@ STD 内部保留的 `icp_threshold` 是历史命名的平面评分参数，不�
 `map → world` 从 `/lio/odom`、`/lio/imu/odom` 获取最新数据时间，独立关键帧客户端用关键帧时间兜底。
 暂停时不推进 TF 时间，延迟回环在最新数据时刻发布修正；旧参数
 `lio.ros.align_sensor_time_to_ros_clock=true` 会警告并忽略。
-重放或 seek 到过去时重启节点。详见[时间策略](../../docs/sensor_time_playback.md)。
+重放或 seek 到过去时重启节点；回放命令见 [Quickstart](../../docs/quickstart.md)。
 
 ## 重定位
 
@@ -141,7 +144,7 @@ launch 为后端预留 120 秒再升级退出信号，大地图优先在退出�
 
 ```bash
 ros2 launch super_lio_slam relocation.launch.py \
-  sensor_config:=/home/ros/rosws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/robosense_airy.yaml \
+  sensor_config:=/home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/robosense_airy.yaml \
   map_path:=/absolute/path/to/reference_map.pcd rviz:=true
 ```
 
@@ -155,7 +158,7 @@ ros2 launch super_lio_slam relocation.launch.py \
 参数使用 `relocation_config` / `config/relocation.yaml`，初值为世界系
 `[x,y,z,roll,pitch,yaw]`（m / 度）。`/initialpose` 非零时间戳须属于传感器时间域，
 零时间戳关联当前状态；状态见 `/lio/relocation/status`。
-完整参数与初始化约束见[重定位说明](../../docs/motion_compensated_relocalization_runtime.md)。
+完整参数与初始化约束见[重定位说明](../../docs/relocation_math.md)。
 
 ## 消息、显示与诊断
 
@@ -191,7 +194,7 @@ Robosense 默认显示滤波后的当前扫描。优化地图由 `map_voxel_size
 - LiDAR 和 IMU 输入须同步；缺少逐点时间时只能填零偏移，不能正常恢复帧内运动补偿。
 - Unitree 的 float32 `time` 是相对消息头的秒偏移；Robosense 使用逐点 `timestamp`，单位由传感器 YAML 指定。
 - 重定位需要短时静止初始化，不支持完全动态冷启动；重新定位或换图时重启节点。
-- 默认使用配置或 `/initialpose` 先验；关闭先验可尝试全图粗配准，但没有独立的全局地点检索模块。
+- 当前 `relocation.yaml` 关闭初始位姿先验，全图尝试；可启用配置初值或使用 `/initialpose`。没有独立的全局地点检索模块。
 
 ### GTSAM runtime isolation
 
@@ -199,9 +202,8 @@ CMake 记录实际选定的 GTSAM / TEASER++ 库目录，SLAM 后端和重定位
 直接执行测试程序时先加载工作区，并使用相同库路径：
 
 ```bash
-export LD_LIBRARY_PATH=/usr/local/lib:/home/ros/rosws/SuperLIO_GLIM_ROS2/install/teaserpp/lib:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=/usr/local/lib:/home/ros/ros_ws/SuperLIO_GLIM_ROS2/install/teaserpp/lib:${LD_LIBRARY_PATH:-}
 ctest --test-dir build/super_lio_slam --output-on-failure
 ```
 
-`test/online_loop_smoke.py` 检查合成回环，`test/loop_sensor_time_smoke.py` 检查数据时间与 TF。
-统计工具为 `tools/analyze_loop_logs.py`；设计、统计和详细测试记录放在工作区 `docs/`，不在 README 重复。
+`test/optimized_map_service_smoke.py` 检查保存服务与正常退出自动保存；`test/relocation_motion_smoke.py` 检查运动累积重定位。数学推导放在工作区 `docs/`。
