@@ -8,7 +8,7 @@
 
 两个输入都是 ROS 2 SQLite bag，包含 /unilidar/cloud (sensor_msgs/PointCloud2) 与 /unilidar/imu (sensor_msgs/Imu)。firstpart 时长约 261.4 秒、2587 帧点云；secondpart 时长约 305.0 秒、3018 帧点云。两段记录时间约重叠 130.7 秒，为配准提供重叠区域。
 
-本例使用 super_lio_slam/launch/unitree_slam.launch.py、config/unitree_l1.yaml 和 config/unitree_slam.yaml。Unitree L1 的点云 time 字段按秒解释；传感器外参是当前配置中的初始值，精度要求高时应先按实物标定。
+本例使用 super_lio_slam/launch/unitree_slam.launch.py、config/common/unitree_l1.yaml 和 config/loop/unitree_slam.yaml。Unitree L1 的点云 time 字段按秒解释；传感器外参是当前配置中的初始值，精度要求高时应先按实物标定。
 
 数据链路的坐标关系：
 

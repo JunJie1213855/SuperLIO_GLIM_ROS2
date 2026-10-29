@@ -11,7 +11,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('std_config', default_value=PathJoinSubstitution(
-            [FindPackageShare('super_lio_slam'), 'config', 'std_extract.yaml'])),
+            [FindPackageShare('super_lio_slam'), 'config', 'loop/std_extract.yaml'])),
         DeclareLaunchArgument('input_topic', default_value='/points_raw'),
         DeclareLaunchArgument('output_dir', default_value='/tmp/std_descriptors'),
         DeclareLaunchArgument('max_visualized_descriptors', default_value='100'),

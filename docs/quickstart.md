@@ -17,7 +17,7 @@ source install/setup.bash
 mkdir -p "$OUT"
 ```
 
-| 传感器 | 建图启动文件 | 重定位 `sensor_config` 文件（位于 `src/SuperLIO_SLAM/config/`） |
+| 传感器 | 建图启动文件 | 重定位 `sensor_config` 文件（位于 `src/SuperLIO_SLAM/config/common/`） |
 |---|---|---|
 | VLP32 / UrbanNav | `vlp32.launch.py` | `vlp32.yaml` |
 | Robosense Airy | `robosense_airy.launch.py` | `robosense_airy.yaml` |
@@ -95,8 +95,8 @@ lio.map.save_interval: 500
 
 ```bash
 ros2 launch super_lio_slam relocation.launch.py \
-  sensor_config:="$WS/src/SuperLIO_SLAM/config/vlp32.yaml" \
-  relocation_config:="$WS/src/SuperLIO_SLAM/config/relocation.yaml" \
+  sensor_config:="$WS/src/SuperLIO_SLAM/config/common/vlp32.yaml" \
+  relocation_config:="$WS/src/SuperLIO_SLAM/config/relocation/relocation.yaml" \
   map_path:="$OUT/reference_map.pcd" rviz:=true
 ```
 

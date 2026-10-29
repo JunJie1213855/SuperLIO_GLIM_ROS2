@@ -1286,8 +1286,8 @@ $$
 | GICP、质量和退化验收 | [GicpRegistration.cpp](../src/SuperLIO_SLAM/src/loop/GicpRegistration.cpp) |
 | 候选、图构建、异步回环提交、路径和地图 | [LoopBackendNode.cpp](../src/SuperLIO_SLAM/src/loop/LoopBackendNode.cpp) |
 | 后端状态与快照结构 | [LoopBackendNode.hpp](../src/SuperLIO_SLAM/include/loop/LoopBackendNode.hpp)、[SubmapRegistration.hpp](../src/SuperLIO_SLAM/include/loop/SubmapRegistration.hpp) |
-| 图与候选配置 | [slam.yaml](../src/SuperLIO_SLAM/config/slam.yaml) |
-| 室内 / 室外配准配置 | [室内](../src/SuperLIO_SLAM/config/loop_indoor_teaser_gicp.yaml)、[室外](../src/SuperLIO_SLAM/config/loop_outdoor_teaser_gicp.yaml) |
+| 图与候选配置 | [slam.yaml](../src/SuperLIO_SLAM/config/loop/slam.yaml) |
+| 室内 / 室外配准配置 | [室内](../src/SuperLIO_SLAM/config/loop/loop_indoor_teaser_gicp.yaml)、[室外](../src/SuperLIO_SLAM/config/loop/loop_outdoor_teaser_gicp.yaml) |
 | 公共启动参数 | [slam.launch.py](../src/SuperLIO_SLAM/launch/slam.launch.py) |
 
 旧草稿中提到的 historicalSubmap() 和 verifyWithIcp() 已不对应当前接口。本文件采用当前 SubmapWindow、verifySubmaps()、verifyWithGicp()、addGraphNode() 和 commitLoop() 的分工。

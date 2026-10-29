@@ -54,3 +54,5 @@ docs/               使用说明与数学推导
 ROS 2 节点、组件和离线查看器已纳入 `glim` 包，源码位于 `src/glim/ros2/`；不再单独构建 `glim_ros`。入口统一为 `ros2 run glim glim_rosnode`、`ros2 run glim glim_rosbag <bag目录>` 和 `ros2 run glim offline_viewer <dump目录>`。节点名、话题、配置键和 `glim::GlimROS` 组件类名保持不变。
 
 从旧工作区升级时，请在新终端仅 source ROS 环境后重新构建；旧的 `install/glim_ros` 是过期产物，不应继续使用。
+
+SuperLIO 配置分为 `config/common/`（传感器与前端）、`config/loop/`（关键帧与回环）、`config/relocation/`（重定位）。启动文件默认路径已同步；显式指定 YAML 时需使用新路径。

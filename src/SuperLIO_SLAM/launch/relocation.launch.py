@@ -34,8 +34,8 @@ def generate_launch_description():
     share=FindPackageShare('super_lio_slam')
     config=lambda name: PathJoinSubstitution([share,'config',name])
     return LaunchDescription([
-        DeclareLaunchArgument('sensor_config',default_value=config('robosense_airy.yaml')),
-        DeclareLaunchArgument('relocation_config',default_value=config('relocation.yaml')),
+        DeclareLaunchArgument('sensor_config',default_value=config('common/robosense_airy.yaml')),
+        DeclareLaunchArgument('relocation_config',default_value=config('relocation/relocation.yaml')),
         DeclareLaunchArgument('map_path',default_value='',description='Absolute reference PCD path; empty uses YAML'),
         DeclareLaunchArgument('use_sim_time',default_value='false',choices=['true','false']),
         DeclareLaunchArgument('rviz',default_value='true',choices=['true','false']),

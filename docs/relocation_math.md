@@ -926,7 +926,7 @@ $$
 | 粗配准与几何内点检查 | [TeaserCoarseRegistration.cpp](../src/loop/TeaserCoarseRegistration.cpp) |
 | 精配准、覆盖率、MSE 和退化诊断 | [GicpRegistration.cpp](../src/loop/GicpRegistration.cpp) |
 | 点云、位姿、TF 和参考系切换 | [ROSWrapper.cpp](../src/ros/ROSWrapper.cpp) |
-| 启动和独立重定位参数 | [relocation.launch.py](../launch/relocation.launch.py)、[relocation.yaml](../config/relocation.yaml) |
+| 启动和独立重定位参数 | [relocation.launch.py](../launch/relocation.launch.py)、[relocation.yaml](../src/SuperLIO_SLAM/config/relocation/relocation.yaml) |
 
 当前实现的确定性参考系变换与其右乘姿态误差定义一致。完整的配准不确定性与相关性传播仍是后续工作。
 

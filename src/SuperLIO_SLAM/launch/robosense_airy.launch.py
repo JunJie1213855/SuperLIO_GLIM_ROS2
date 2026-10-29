@@ -11,11 +11,11 @@ def generate_launch_description():
     share = FindPackageShare('super_lio_slam')
     return LaunchDescription([
         DeclareLaunchArgument('sensor_config', default_value=PathJoinSubstitution(
-            [share, 'config', 'robosense_airy.yaml'])),
+            [share, 'config', 'common/robosense_airy.yaml'])),
         DeclareLaunchArgument('slam_config', default_value=PathJoinSubstitution(
-            [share, 'config', 'slam.yaml'])),
+            [share, 'config', 'loop/slam.yaml'])),
         DeclareLaunchArgument('registration_config', default_value=PathJoinSubstitution(
-            [share, 'config', 'loop_indoor_teaser_gicp.yaml'])),
+            [share, 'config', 'loop/loop_indoor_teaser_gicp.yaml'])),
         DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([share, 'launch', 'slam.launch.py'])),

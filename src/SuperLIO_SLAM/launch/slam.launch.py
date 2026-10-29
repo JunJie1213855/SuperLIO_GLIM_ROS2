@@ -55,11 +55,11 @@ def generate_launch_description():
         ]),
     ])
     return LaunchDescription([
-        DeclareLaunchArgument('sensor_config', default_value=config('livox_360.yaml'),
+        DeclareLaunchArgument('sensor_config', default_value=config('common/livox_360.yaml'),
                               description='Sensor and SuperLIO front-end YAML'),
-        DeclareLaunchArgument('slam_config', default_value=config('slam.yaml'),
+        DeclareLaunchArgument('slam_config', default_value=config('loop/slam.yaml'),
                               description='Keyframe, STD, iSAM2 and map parameters'),
-        DeclareLaunchArgument('registration_config', default_value=config('loop_teaser_gicp.yaml'),
+        DeclareLaunchArgument('registration_config', default_value=config('loop/loop_teaser_gicp.yaml'),
                               description='Shared GICP quality and optional TEASER++ parameters'),
         DeclareLaunchArgument('enable_loop_backend', default_value='true', choices=['true', 'false'],
                               description='Enable keyframes and the online pose-graph backend'),

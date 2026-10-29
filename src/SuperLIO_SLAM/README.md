@@ -34,14 +34,24 @@ source install/setup.bash
 
 ## 启动与配置
 
+配置按用途分组，文件名和参数值保持不变：
+
+| 目录 | 配置内容 |
+|---|---|
+| `config/common/` | 各传感器的话题、字段、外参及前端参数，如 `robosense_airy.yaml`、`unitree_l1.yaml`、`vlp32.yaml` |
+| `config/loop/` | `slam.yaml`、`unitree_slam.yaml`、`std_extract.yaml` 及 `loop_*_teaser_gicp.yaml`，管理关键帧、STD、图优化和回环配准门限 |
+| `config/relocation/` | `relocation.yaml`，管理重定位流程和配准门限 |
+
+启动入口自动使用新路径，原来的 launch 命令不变。显式传入 `sensor_config`、`slam_config`、`registration_config`、`std_config` 或 `relocation_config` 时，需使用相应子目录下的路径。安装后的 `share/super_lio_slam/config/` 采用相同布局；构建生成的 `runtime_library_dirs.txt` 保留在 `config/` 根目录。
+
 各终端先加载上述 ROS 和工作区环境，使用相同 DDS 配置；每个 bag 会话单独启动算法。
 
-| 入口 | 传感器配置 | 默认配准配置 |
+| 入口 | 传感器配置（相对 `config/`） | 默认配准配置（相对 `config/`） |
 |---|---|---|
-| `unitree_slam.launch.py` | `unitree_l1.yaml` | `loop_indoor_teaser_gicp.yaml` |
-| `robosense_airy.launch.py` | `robosense_airy.yaml` | `loop_indoor_teaser_gicp.yaml` |
-| `vlp32.launch.py` | `vlp32.yaml` | `loop_outdoor_teaser_gicp.yaml` |
-| `Livox_mid360.launch.py` / `slam.launch.py` | `livox_360.yaml` | `loop_teaser_gicp.yaml` |
+| `unitree_slam.launch.py` | `common/unitree_l1.yaml` | `loop/loop_indoor_teaser_gicp.yaml` |
+| `robosense_airy.launch.py` | `common/robosense_airy.yaml` | `loop/loop_indoor_teaser_gicp.yaml` |
+| `vlp32.launch.py` | `common/vlp32.yaml` | `loop/loop_outdoor_teaser_gicp.yaml` |
+| `Livox_mid360.launch.py` / `slam.launch.py` | `common/livox_360.yaml` | `loop/loop_teaser_gicp.yaml` |
 
 ```bash
 ros2 launch super_lio_slam robosense_airy.launch.py rviz:=true
@@ -144,7 +154,7 @@ launch 为后端预留 120 秒再升级退出信号，大地图优先在退出�
 
 ```bash
 ros2 launch super_lio_slam relocation.launch.py \
-  sensor_config:=/home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/robosense_airy.yaml \
+  sensor_config:=/home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/common/robosense_airy.yaml \
   map_path:=/absolute/path/to/reference_map.pcd rviz:=true
 ```
 
@@ -155,7 +165,7 @@ ros2 launch super_lio_slam relocation.launch.py \
 成功后使用参考地图跟踪，默认不更新地图。TF 为 `world → odom_local → imu`；
 输出在定位前为 odom_local、成功后为 world。重定位不向回环后端发布关键帧。
 
-参数使用 `relocation_config` / `config/relocation.yaml`，初值为世界系
+参数使用 `relocation_config` / `config/relocation/relocation.yaml`，初值为世界系
 `[x,y,z,roll,pitch,yaw]`（m / 度）。`/initialpose` 非零时间戳须属于传感器时间域，
 零时间戳关联当前状态；状态见 `/lio/relocation/status`。
 完整参数与初始化约束见[重定位说明](../../docs/relocation_math.md)。

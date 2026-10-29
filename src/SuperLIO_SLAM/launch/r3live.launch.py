@@ -11,9 +11,9 @@ def generate_launch_description():
     share = FindPackageShare('super_lio_slam')
     return LaunchDescription([
         DeclareLaunchArgument('sensor_config', default_value=PathJoinSubstitution(
-            [share, 'config', 'r3live.yaml'])),
+            [share, 'config', 'common/r3live.yaml'])),
         DeclareLaunchArgument('slam_config', default_value=PathJoinSubstitution(
-            [share, 'config', 'slam.yaml'])),
+            [share, 'config', 'loop/slam.yaml'])),
         DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([share, 'launch', 'slam.launch.py'])),
