@@ -465,18 +465,22 @@ namespace LI2Sup
            usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1e6;
   }
 
+  // lidar 点云反向去畸变
   void SuperLIO::Propagation_Undistort()
   {
     propagate_states_.clear();
     propagate_states_.emplace_back(kf_->GetDynamicState());
     kf_->SetObsTime(measures_.lidar.end_time);
     // std::cout << "size of imu :" << measures_.imu.size() << std::endl;
+
+    // 收集前向传播的状态
     for (auto &imu : measures_.imu)
     {
       kf_->Predict(imu);
       propagate_states_.emplace_back(kf_->GetDynamicState());
     }
 
+    // 多前向传播一个 imu 数据，并且收集该状态，用来插值
     if (!measures_.imu.empty() && kf_->GetTime() < measures_.lidar.end_time)
     {
       auto end_imu = measures_.imu.back();
@@ -485,6 +489,7 @@ namespace LI2Sup
       propagate_states_.emplace_back(kf_->GetDynamicState());
     }
 
+    // 外参获取
     static const M3 TLI_R = g_lidar_imu.R_;
     static const V3 TLI_t = g_lidar_imu.t_;
     const SE3 T_end = kf_->GetSE3();
@@ -496,6 +501,7 @@ namespace LI2Sup
     std::size_t ptsize = raw_pc->points.size();
     scan_undistort_full_->resize(ptsize);
 
+    // 并行去畸变
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, ptsize),
         [&](const tbb::blocked_range<size_t> &r)
