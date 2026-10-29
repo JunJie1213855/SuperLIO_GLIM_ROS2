@@ -106,12 +106,16 @@ namespace super_lio_slam
       }
       else
       {
+        // teaser++ 粗配准
         result = coarseRegister(source, target, settings);
       }
+
+      // gicp 精配准
       if (result.accepted)
         result = refineRegister(source, target, current, settings, result);
       return result;
     };
+    
     output.registration = attempt(task.world_from_local_hint ? &*task.world_from_local_hint : nullptr);
     if (!output.registration.accepted && task.world_from_local_hint)
       output.registration = attempt(nullptr);

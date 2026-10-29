@@ -158,6 +158,8 @@ namespace LI2Sup
     reference_tree_.setInputCloud(reference_cloud_);
     local_ivox_ = ivox_;
     data_wrapper_->set_global_map(reference_cloud_);
+
+    // 设置初始化位姿猜测回调函数
     data_wrapper_->setRelocationInitialPoseCallback([this](const auto &msg)
                                                     { receivePrior(msg); });
     setStatus("WAITING_FOR_STATIONARY_IMU");
@@ -176,13 +178,16 @@ namespace LI2Sup
       }
       initialization_imu_.push_back(imu);
     }
+    // 剔除过多的 imu 采样数据
     while (initialization_imu_.size() > std::max<std::size_t>(imu_samples_ * 4, 1000))
       initialization_imu_.pop_front();
     RCLCPP_INFO_THROTTLE(data_wrapper_->get_logger(), *data_wrapper_->get_clock(), 5000,
                          "Relocation IMU initialization: samples=%zu scan_points=%zu", initialization_imu_.size(), measures_.lidar.pc->size());
+    // 防止过少的 imu 采样数据
     if (initialization_imu_.size() < imu_samples_ ||
         initialization_imu_.back().secs - initialization_imu_.front().secs < init_duration_)
       return false;
+    // 均值
     V3 mean_acc = V3::Zero(), mean_gyro = V3::Zero(), acc_square = V3::Zero(), gyro_square = V3::Zero();
     for (const auto &imu : initialization_imu_)
     {
@@ -192,8 +197,10 @@ namespace LI2Sup
       gyro_square += imu.gyr.cwiseProduct(imu.gyr);
     }
     const float n = initialization_imu_.size();
+    // 均值
     mean_acc /= n;
     mean_gyro /= n;
+    // 方差
     const float acc_std = (acc_square / n - mean_acc.cwiseProduct(mean_acc)).cwiseMax(0).sum();
     const float gyro_std = (gyro_square / n - mean_gyro.cwiseProduct(mean_gyro)).cwiseMax(0).sum();
     if (std::sqrt(acc_std) > max_accel_std_ || std::sqrt(gyro_std) > max_gyro_std_ || mean_acc.norm() < 1e-3)
@@ -201,6 +208,7 @@ namespace LI2Sup
       initialization_imu_.clear();
       return false;
     }
+    // 初始化旋转估计
     const M3 rotation = Quat::FromTwoVectors(mean_acc, V3::UnitZ()).toRotationMatrix();
     ESKF::Options options;
     options.gyro_var_ = g_imu_ng;
@@ -209,9 +217,14 @@ namespace LI2Sup
     options.bias_acce_var_ = g_imu_nba;
     options.num_iterations_ = g_kf_max_iterations;
     options.quit_eps_ = g_kf_quit_eps;
+
+    // kf 初始化
     kf_->SetInitialConditions(options, mean_gyro, V3::Zero(), g_gravity_norm / mean_acc.norm(), V3(0, 0, -g_gravity_norm));
+
+    // 设置初始预测
     kf_->InitializePrediction(SysState(measures_.lidar.end_time, SO3(rotation)), initialization_imu_.back());
     scan_undistort_full_->clear();
+
     // Only one stationary scan seeds the local map. Moving scans use propagation/deskew below.
     for (const auto &p : *measures_.lidar.pc)
     {
@@ -221,8 +234,14 @@ namespace LI2Sup
       out.intensity = p.intensity;
       scan_undistort_full_->push_back(out);
     }
+
+    // 降采样
     DownSample();
+
+    // 扫描限制
     limitScan();
+
+    // 设置剩下的数据和状态
     if (ds_undistort_->size() < static_cast<std::size_t>(min_plane_points_))
     {
       kf_->init_ = false;
@@ -232,8 +251,10 @@ namespace LI2Sup
     for (const auto &p : *ds_undistort_)
       points.push_back(rotation * p.getVector3fMap());
     local_ivox_->insert(points);
+    // 系统初始位姿
     sys_init_pose_ = kf_->GetSE3();
     prior_local_pose_ = sys_init_pose_;
+    // 状态变化
     stage_ = Stage::Local;
     tracking_good_ = true;
     rememberFrame();
@@ -290,12 +311,14 @@ namespace LI2Sup
     registration_cv_.notify_one();
   }
 
+  // 配准重定位线程
   void SuperLIOReLoc::registrationWorker()
   {
     while (!stopping_)
     {
       RelocationSnapshot task;
       {
+        // 接收任务并且执行配准任务
         std::unique_lock<std::mutex> lock(registration_mutex_);
         registration_cv_.wait(lock, [this]
                               { return stopping_ || pending_task_.has_value(); });
@@ -307,6 +330,7 @@ namespace LI2Sup
       RelocationResult result;
       try
       {
+        // 重定位配准
         result = registerRelocation(task, settings_, crop_radius_, gravity_angle_);
       }
       catch (const std::exception &e)
@@ -328,14 +352,17 @@ namespace LI2Sup
     }
   }
 
+  // 提交配准任务
   bool SuperLIOReLoc::commitRegistration()
   {
     std::optional<RelocationResult> result;
     {
+      // 重置结果
       std::lock_guard<std::mutex> lock(registration_mutex_);
       result = std::move(pending_result_);
       pending_result_.reset();
     }
+    // 上一个结果是否有效，无效就返回让循环提交下一次配准
     if (!result || result->generation != generation_ || !result->registration.accepted || !tracking_good_)
       return false;
     const auto &transform = result->registration.transform;
@@ -350,11 +377,13 @@ namespace LI2Sup
     std::size_t inliers = 0;
     double sum = 0;
     for (const auto &p : *aligned)
+    {
       if (reference_tree_.nearestKSearch(p, 1, indices, distances) == 1 && distances[0] <= settings_.quality_radius * settings_.quality_radius)
       {
         ++inliers;
         sum += distances[0];
       }
+    }
     const double overlap = aligned->empty() ? 0 : static_cast<double>(inliers) / aligned->size();
     const double mse = inliers ? sum / inliers : std::numeric_limits<double>::infinity();
     if (inliers < static_cast<std::size_t>(settings_.min_inliers) || overlap <= settings_.min_current_overlap || mse >= settings_.max_mse)
@@ -371,6 +400,8 @@ namespace LI2Sup
     }
     const SE3 world_from_local(transform.cast<scalar>());
     const double latest_time = kf_->GetTime();
+
+    // 配准成功，就直接改变参考帧，从当前局部坐标系转换到全局坐标系上，同时更新状态和协方差
     kf_->ChangeReferenceFrame(world_from_local, position_variance_, rotation_variance_);
     sys_init_pose_ = world_from_local * sys_init_pose_;
     last_pose_ = kf_->GetSE3();
@@ -380,6 +411,8 @@ namespace LI2Sup
     ds_world_->clear();
     ivox_ = reference_ivox_;
     local_ivox_.reset();
+
+    // 设置相关信号
     data_wrapper_->commitRelocationFrame(world_from_local);
     stage_ = Stage::World;
     ++generation_;
@@ -399,6 +432,7 @@ namespace LI2Sup
     return true;
   }
 
+  // 接收先验参数
   void SuperLIOReLoc::receivePrior(const geometry_msgs::msg::PoseWithCovarianceStamped &msg)
   {
     if (stage_ == Stage::World || stage_ == Stage::Failed)
@@ -411,11 +445,15 @@ namespace LI2Sup
       RCLCPP_WARN(data_wrapper_->get_logger(), "Initial pose must be expressed in world");
       return;
     }
+    // 位姿分解
     const auto &p = msg.pose.pose.position;
     const auto &q = msg.pose.pose.orientation;
+
+    // 旋转
     Quat rotation(q.w, q.x, q.y, q.z);
     if (!V3(p.x, p.y, p.z).allFinite() || !rotation.coeffs().allFinite() || rotation.norm() < 1e-6)
       return;
+    // 局部位姿
     SE3 local_pose = kf_->GetSE3();
     if (stage_ == Stage::Local && (msg.header.stamp.sec != 0 || msg.header.stamp.nanosec != 0))
     {
@@ -435,7 +473,9 @@ namespace LI2Sup
       }
       local_pose = SE3(best->odom_pose.matrix().cast<scalar>());
     }
+    // 四元数归一化
     rotation.normalize();
+    // 先验位姿
     prior_pose_ = SE3(rotation, V3(p.x, p.y, p.z));
     prior_local_pose_ = local_pose;
     have_prior_ = true;
@@ -448,6 +488,7 @@ namespace LI2Sup
 
   void SuperLIOReLoc::process()
   {
+    // imu 和 lidar 时钟同步
     if (!data_wrapper_->sync_measure(measures_) || stage_ == Stage::Failed)
       return;
     if (!std::isfinite(measures_.lidar.end_time) || measures_.lidar.end_time <= last_scan_time_)
@@ -457,30 +498,35 @@ namespace LI2Sup
       return;
     }
     last_scan_time_ = measures_.lidar.end_time;
+
+    // 如果当前系统刚启动，那就是初始化局部地图和位姿
     if (stage_ == Stage::Bootstrap)
     {
       initializeLocal();
       return;
     }
-    Propagation_Undistort();
-    DownSample();
-    limitScan();
-    Observe();
+
+    // 初始化完后开始局部建图
+    Propagation_Undistort(); // 去畸变
+    DownSample();            // 降采样
+    limitScan();             // 扫描限制
+    Observe();               // 观测更新
     tracking_good_ = 0;
     int planes = 0;
     for (std::size_t i = 0; i < ds_undistort_->size(); ++i)
       if (effect_mask_[i])
         ++planes;
     tracking_good_ = planes >= min_plane_points_ && kf_->GetSE3().matrix().allFinite();
-    if (stage_ == Stage::Local)
+   
+    if (stage_ == Stage::Local) // 如果是局部建图，就尝试进行重定位
     {
       if (tracking_good_)
       {
-        SuperLIO::UpdateMap();
+        SuperLIO::UpdateMap(); // 地图更新
         rememberFrame();
-        if (!commitRegistration())
+        if (!commitRegistration()) // 如果配准失败
         {
-          enqueueRegistration();
+          enqueueRegistration(); // 启动新的配准
           setStatus("LOCAL_TRACKING");
         }
       }
@@ -489,9 +535,9 @@ namespace LI2Sup
         setStatus("LOCAL_TRACKING_DEGRADED");
       }
     }
-    else if (g_update_map && tracking_good_)
+    else if (g_update_map && tracking_good_)  // 如果是全局坐标系建图，那就更新地图
     {
-      SuperLIO::UpdateMap();
+      SuperLIO::UpdateMap(); // 如果可以更新且跟踪良好，那就更新
     }
     Output();
   }
