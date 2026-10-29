@@ -14,7 +14,10 @@ Makefile
 *.so
 *.so.*
 
-# Python
+# Python caches and local virtual environments
+.venv/
+venv/
+*.egg-info/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -31,6 +34,9 @@ __pycache__/
 # ROS bags and generated mapping data (keep datasets/results out of Git)
 *.bag
 *.db3
+*.db3-shm
+*.db3-wal
+*.bag.active
 *.mcap
 *.pcd
 *.ply
@@ -55,3 +61,22 @@ logs/
 /install_standalone/
 /log_standalone/
 /results/
+
+# Tests: keep C++/Python sources and test configuration in Git.
+# Write local reports/artifacts into these directories instead of the source tree.
+/test_results/
+/src/SuperLIO_SLAM/test/results/
+/src/SuperLIO_SLAM/test/output/
+/src/SuperLIO_SLAM/test/artifacts/
+
+# CTest / coverage output
+Testing/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
