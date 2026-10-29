@@ -69,7 +69,7 @@ def main():
     print("\n完成。之后用 offline_viewer 打开即可：")
     print("  source /opt/ros/humble/setup.bash && source install/setup.bash")
     print("  export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH")
-    print("  ros2 run glim_ros offline_viewer <dump目录>")
+    print("  ros2 run glim offline_viewer <dump目录>")
 
 
 if __name__ == "__main__":

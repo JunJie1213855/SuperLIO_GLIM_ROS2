@@ -16,8 +16,8 @@
 > export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 >
 > # 常用命令
-> ros2 run glim_ros glim_rosbag <rosbag2目录>     # 离线建图，自动保存到 /tmp/dump
-> ros2 run glim_ros offline_viewer <dump目录>     # 查看 / 编辑地图
+> ros2 run glim glim_rosbag <rosbag2目录>     # 离线建图，自动保存到 /tmp/dump
+> ros2 run glim offline_viewer <dump目录>     # 查看 / 编辑地图
 > ```
 >
 > 完整步骤 —— 传感器配置、输出格式、打开旧版本 dump、排错速查 —— 见 **[quickstart.md](quickstart.md)**。

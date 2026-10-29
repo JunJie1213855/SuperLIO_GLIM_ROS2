@@ -44,7 +44,13 @@ source install/setup.bash
 ```text
 src/SuperLIO_SLAM/   SuperLIO 前端、回环、保存地图与重定位
 src/glim/           GLIM 子图优化
-src/glim_ros2/      ROS 2 接口与 Offline Viewer
+src/glim/ros2/      ROS 2 接口与 Offline Viewer
 tools/              TEASER++ 构建、关键帧导出与地图格式转换
 docs/               使用说明与数学推导
 ```
+
+### GLIM ROS 2 接口合并
+
+ROS 2 节点、组件和离线查看器已纳入 `glim` 包，源码位于 `src/glim/ros2/`；不再单独构建 `glim_ros`。入口统一为 `ros2 run glim glim_rosnode`、`ros2 run glim glim_rosbag <bag目录>` 和 `ros2 run glim offline_viewer <dump目录>`。节点名、话题、配置键和 `glim::GlimROS` 组件类名保持不变。
+
+从旧工作区升级时，请在新终端仅 source ROS 环境后重新构建；旧的 `install/glim_ros` 是过期产物，不应继续使用。

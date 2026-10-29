@@ -431,7 +431,7 @@ def main():
     print("打开验证：")
     print("  source /opt/ros/humble/setup.bash && source install/setup.bash")
     print("  export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH")
-    print(f"  ros2 run glim_ros offline_viewer {out}")
+    print(f"  ros2 run glim offline_viewer {out}")
 
 
 if __name__ == "__main__":

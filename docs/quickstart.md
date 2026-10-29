@@ -138,7 +138,7 @@ for part in firstpart secondpart; do
     --poses "$OUT/${part}_export/poses.txt" --clouds "$OUT/${part}_export/clouds" \
     --out "$OUT/${part}_dump" --frames-per-submap 10 --voxel-size 0.2 --config src/glim/config
 done
-ros2 run glim_ros offline_viewer "$OUT/firstpart_dump"
+ros2 run glim offline_viewer "$OUT/firstpart_dump"
 ```
 
 导出点云已经在地图坐标系，不要再次乘位姿。首次转换会编译图写入工具，需要匹配的 GTSAM / gtsam_points；各输出目录使用新名称。
