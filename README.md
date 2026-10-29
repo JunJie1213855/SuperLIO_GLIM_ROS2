@@ -122,6 +122,25 @@ ros2 launch super_lio_slam unitree_slam.launch.py \
 
 ## 2. 导出优化关键帧与轨迹
 
+如果只需要参考地图用于重定位，可跳过 rosbag 录制和逐帧导出，在建图时指定：
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py \
+  save_map_path:=/home/ros/dataset/urbannav/slam_results/reference_map.pcd \
+  save_map_voxel_size:=0.2 save_map_on_shutdown:=true
+```
+
+停止数据输入、确认关键帧接收完后，在另一终端执行：
+
+```bash
+ros2 service call /lio_slam/save_optimized_map std_srvs/srv/Trigger '{}'
+```
+
+服务先等待运行/排队中的回环任务完成，再保存全部已保留关键帧的优化地图，
+不受 RViz 地图显示限制。正常退出也可自动保存；相同路径会原子替换已有 PCD。
+`save_map_voxel_size=0` 流式保存全部保留点；正值按体素增量融合，减少额外内存。
+若需要后续 GLIM 分会话处理或逐关键帧轨迹，继续使用下面的录制和导出流程。
+
 `export_superlio.py` 按时间戳关联关键帧和最后一条优化路径，输出 map 系点云与 TUM 位姿：
 
 ```bash

@@ -116,6 +116,29 @@ STD 内部保留的 `icp_threshold` 是历史命名的平面评分参数，不�
 
 ## 重定位
 
+用于重定位的参考地图可以直接从在线后端保存，无需录制关键帧 rosbag：
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py \
+  save_map_path:=/home/ros/dataset/urbannav/slam_results/reference_map.pcd \
+  save_map_voxel_size:=0.2 save_map_on_shutdown:=true
+
+# 另一个已加载环境的终端：停止数据输入，等关键帧接收完后调用。
+ros2 service call /lio_slam/save_optimized_map std_srvs/srv/Trigger '{}'
+```
+
+服务等待当前运行和已排队的回环配准结束，再按优化位姿保存全部后端关键帧。
+服务与关键帧入口串行执行；请先停止输入，以免保存期间接收队列积压。
+`save_map_on_shutdown=true` 在正常 Ctrl+C 退出时也执行保存；崩溃或 SIGKILL 不保证保存。
+launch 为后端预留 120 秒再升级退出信号，大地图优先在退出前调用服务并确认成功。
+
+输出是 map 系二进制 XYZI PCD。相同路径重复保存会原子替换旧文件，失败保留旧文件。
+`save_map_voxel_size=0` 逐点流式保存；正数采用增量体素质心融合，额外内存随占用体素数增长。
+它不受 `map_max_keyframes`、`map_max_points_per_keyframe` 或 `path_max_poses` 限制，
+但输入是已接收并经过前端/后端关键帧过滤的点云，不能恢复原始扫描中已丢弃的点。
+默认输出 `map/optimized_map.pcd`（相对启动目录），体素 0.2 m，默认关闭退出自动保存。
+也可在 `slam.yaml` 中设置这三个参数；未显式提供 launch 参数时保留 YAML 值。
+
 ```bash
 ros2 launch super_lio_slam relocation.launch.py \
   sensor_config:=/home/ros/rosws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/robosense_airy.yaml \

@@ -23,6 +23,11 @@ def _make_loop_backend(context):
         raise RuntimeError('Build-time runtime libraries moved; rebuild super_lio_slam')
     inherited = context.environment.get('LD_LIBRARY_PATH', '').split(os.pathsep)
     library_path = os.pathsep.join(dict.fromkeys(directory for directory in [*directories, *inherited] if directory))
+    save_overrides = {}
+    for name, value_type in [('save_map_path', str), ('save_map_voxel_size', float),
+                             ('save_map_on_shutdown', bool)]:
+        if LaunchConfiguration(name).perform(context):
+            save_overrides[name] = ParameterValue(LaunchConfiguration(name), value_type=value_type)
     return [Node(
         package='super_lio_slam', executable='loop_backend_node', name='loop_backend_node', namespace='',
         output='screen', additional_env={'LD_LIBRARY_PATH': library_path},
@@ -31,8 +36,10 @@ def _make_loop_backend(context):
             'loop_registration_mode': LaunchConfiguration('loop_registration_mode'),
             'loop_candidate_mode': LaunchConfiguration('loop_candidate_mode'),
             'loop_candidate_radius_m': ParameterValue(LaunchConfiguration('loop_candidate_radius_m'), value_type=float),
+            **save_overrides,
         }],
         arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
+        sigterm_timeout='120', sigkill_timeout='120',
     )]
 
 
@@ -64,6 +71,12 @@ def generate_launch_description():
                               choices=['std_gicp', 'std_teaser_gicp'],
                               description='Loop registration algorithm'),
         DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('save_map_path', default_value='',
+                              description='Optimized PCD output path; empty uses slam_config'),
+        DeclareLaunchArgument('save_map_voxel_size', default_value='',
+                              description='Saved map voxel size in metres; 0 disables fusion; empty uses YAML'),
+        DeclareLaunchArgument('save_map_on_shutdown', default_value='', choices=['', 'true', 'false'],
+                              description='Save optimized map on graceful exit; empty uses YAML'),
         DeclareLaunchArgument('rviz', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('rviz_config', default_value=default_rviz,
                               description='RViz file; automatically matches backend/front-end mode'),

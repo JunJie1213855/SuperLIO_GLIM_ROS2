@@ -6,7 +6,7 @@ relocation_node:
     lio.relocation.init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Empty means sensor YAML's lio.map.save_map_dir + lio.map.map_name.
     relocation.map_path: ""
-    relocation.use_initial_pose: true
+    relocation.use_initial_pose: false
     relocation.map_crop_radius_m: 80.0  # 0 disables crop; no hint also uses the whole map
     relocation.window_min_frames: 5
     relocation.window_max_frames: 10
@@ -45,9 +45,9 @@ relocation_node:
     teaser_max_clique_time_limit_s: 0.05
     teaser_max_clique_num_threads: 2
     coarse_residual_threshold_m: 0.6
-    coarse_min_inliers: 6
-    coarse_min_inlier_ratio: 0.3
-    coarse_max_inlier_rmse_m: 0.3
+    coarse_min_inliers: 3
+    coarse_min_inlier_ratio: 0.1
+    coarse_max_inlier_rmse_m: 0.4
     gicp_max_iterations: 40
     gicp_correspondence_randomness: 20
     gicp_max_correspondence_distance_m: 2.0
@@ -57,5 +57,5 @@ relocation_node:
     quality_min_inlier_count: 100
     quality_max_inlier_mse_m2: 0.1  # strict <0.1 m^2
     quality_min_information_ratio: 0.00001
-    quality_max_refinement_translation_m: 5.0
-    quality_max_refinement_rotation_deg: 20.0
+    quality_max_refinement_translation_m: 10000000000000.0
+    quality_max_refinement_rotation_deg: 180.0

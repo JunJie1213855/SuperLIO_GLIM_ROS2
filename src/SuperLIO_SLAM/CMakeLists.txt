@@ -15,6 +15,7 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(rosidl_default_runtime REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
@@ -128,13 +129,14 @@ target_link_libraries(std_extract_node std_descriptor_core)
 add_executable(loop_backend_node
   src/apps/loop_backend_node.cpp
   src/loop/LoopBackendNode.cpp
+  src/loop/OptimizedMapWriter.cpp
 )
 target_include_directories(loop_backend_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${PCL_INCLUDE_DIRS}
 )
 ament_target_dependencies(loop_backend_node
-  rclcpp std_msgs sensor_msgs geometry_msgs visualization_msgs nav_msgs
+  rclcpp std_msgs std_srvs sensor_msgs geometry_msgs visualization_msgs nav_msgs
   pcl_conversions tf2_ros rosidl_default_runtime)
 target_link_libraries(loop_backend_node
   submap_registration std_descriptor_core Eigen3::Eigen ${PCL_LIBRARIES} gtsam
@@ -161,6 +163,10 @@ ament_package()
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(optimized_map_writer_test test/optimized_map_writer_test.cpp src/loop/OptimizedMapWriter.cpp)
+  target_include_directories(optimized_map_writer_test PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(optimized_map_writer_test PRIVATE Eigen3::Eigen ${PCL_LIBRARIES})
+  add_test(NAME optimized_map_writer_test COMMAND optimized_map_writer_test)
   add_executable(submap_registration_test test/submap_registration_test.cpp)
   target_link_libraries(submap_registration_test PRIVATE submap_registration)
   add_test(NAME submap_registration_test COMMAND submap_registration_test)

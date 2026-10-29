@@ -1,8 +1,10 @@
 #include "loop/LoopBackendNode.hpp"
+#include "loop/OptimizedMapWriter.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -158,6 +160,13 @@ namespace super_lio_slam
     map_max_points_per_keyframe_ =
         declare_parameter<int>("map_max_points_per_keyframe", 1000);
     map_voxel_size_ = declare_parameter<double>("map_voxel_size", 0.5);
+    save_map_path_ = std::filesystem::absolute(
+                         declare_parameter<std::string>("save_map_path", "map/optimized_map.pcd"))
+                         .string();
+    save_map_voxel_size_ = declare_parameter<double>("save_map_voxel_size", 0.2);
+    save_map_on_shutdown_ = declare_parameter<bool>("save_map_on_shutdown", false);
+    if (!std::isfinite(save_map_voxel_size_) || save_map_voxel_size_ < 0)
+      throw std::invalid_argument("save_map_voxel_size must be finite and nonnegative");
     path_max_poses_ = declare_parameter<int>("path_max_poses", 10000);
     std_visualization_max_triangles_ =
         declare_parameter<int>("std_visualization_max_triangles", 100);
@@ -234,6 +243,16 @@ namespace super_lio_slam
     keyframe_sub_ = create_subscription<super_lio_slam::msg::KeyFrame>(
         "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
         std::bind(&LoopBackendNode::onKeyFrame, this, std::placeholders::_1));
+    // Same mutually-exclusive group as keyframe ingest: drain registration, then
+    // capture a consistent final graph. TF callbacks can continue independently.
+    save_map_service_ = create_service<std_srvs::srv::Trigger>(
+        "/lio_slam/save_optimized_map",
+        [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+               std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+        {
+          waitForRegistration();
+          response->success = saveOptimizedMap(response->message);
+        });
     // 配准线程
     registration_thread_ = std::thread(&LoopBackendNode::registrationWorker, this);
     try
@@ -501,7 +520,7 @@ namespace super_lio_slam
     try
     {
       raw_pose = poseFromMsg(msg->odom_pose);
-      cloud = convertAndFilter(msg->cloud);   // 转换为 pcl 格式，并且降采样
+      cloud = convertAndFilter(msg->cloud); // 转换为 pcl 格式，并且降采样
     }
     catch (const std::exception &error)
     {
@@ -574,14 +593,14 @@ namespace super_lio_slam
           if (!loopCandidateEligible(msg->header.stamp, raw_pose, h)) // 检测是否在两帧的时间是否过短
             continue;
           const double distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
-          if (distance <= candidate_radius_m_)                        // 检测两帧距离满足阈值
+          if (distance <= candidate_radius_m_) // 检测两帧距离满足阈值
             nearest.emplace_back(distance, h);
         }
         std::sort(nearest.begin(), nearest.end()); // 从最小的开始配准
         std::vector<std::size_t> selected;
         for (const auto &[distance, h] : nearest)
         {
-          if (selected.size() >= static_cast<std::size_t>(registration_top_k_))  // 有足够多的帧就跳出循环
+          if (selected.size() >= static_cast<std::size_t>(registration_top_k_)) // 有足够多的帧就跳出循环
             break;
           if (std::any_of(selected.begin(), selected.end(), [h](std::size_t previous)
                           { return h > previous ? h - previous <= 2 : previous - h <= 2; }))
@@ -597,7 +616,7 @@ namespace super_lio_slam
             const std::size_t first = h + 1 > static_cast<std::size_t>(submap_limits_.max_frames)
                                           ? h + 1 - submap_limits_.max_frames
                                           : 0;
-            for (std::size_t j = first; j <= h; ++j)            // 添加多帧子图
+            for (std::size_t j = first; j <= h; ++j) // 添加多帧子图
             {
               const auto &frame = frames_[j];
               match.target_window.append({j, rclcpp::Time(frame.stamp).seconds(),
@@ -646,7 +665,7 @@ namespace super_lio_slam
               double time_gap;
               {
                 std::lock_guard<std::mutex> lock(graph_mutex_);
-                if (!loopCandidateEligible(msg->header.stamp, raw_pose, static_cast<std::size_t>(h)))    // 时间检测
+                if (!loopCandidateEligible(msg->header.stamp, raw_pose, static_cast<std::size_t>(h))) // 时间检测
                   continue;
                 candidate_distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
                 time_gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
@@ -743,7 +762,7 @@ namespace super_lio_slam
       try
       {
         // Every ingested keyframe receives an odometry factor, regardless of queue overload.
-        addGraphNode(index, raw_pose);          // 添加因子节点
+        addGraphNode(index, raw_pose); // 添加因子节点
         publishCurrent(index, false);
         publishStdTriangles(index, descriptors);
       }
@@ -997,6 +1016,10 @@ namespace super_lio_slam
 
   LoopBackendNode::~LoopBackendNode()
   {
+    // Executor callbacks have stopped; finish queued/active registration before
+    // taking the final snapshot. No ROS context is needed for disk export.
+    if (save_map_on_shutdown_)
+      waitForRegistration();
     stopping_ = true;
     registration_cv_.notify_all();
     map_cv_.notify_all();
@@ -1004,6 +1027,46 @@ namespace super_lio_slam
       registration_thread_.join();
     if (map_thread_.joinable())
       map_thread_.join();
+    if (save_map_on_shutdown_)
+    {
+      std::string message;
+      saveOptimizedMap(message);
+    }
+  }
+
+  void LoopBackendNode::waitForRegistration()
+  {
+    std::unique_lock<std::mutex> lock(registration_mutex_);
+    registration_idle_cv_.wait(lock, [this]
+                               { return registration_tasks_.empty() && !registration_busy_; });
+  }
+
+  bool LoopBackendNode::saveOptimizedMap(std::string &message)
+  {
+    try
+    {
+      std::vector<OptimizedMapFrame> snapshot;
+      {
+        std::lock_guard<std::mutex> lock(graph_mutex_);
+        if (backend_faulted_)
+          throw std::runtime_error("Pose graph is faulted; refusing to export an inconsistent map");
+        const auto estimate = isam_.calculateEstimate();
+        snapshot.reserve(frames_.size());
+        for (std::size_t i = 0; i < frames_.size(); ++i)
+          snapshot.push_back({Eigen::Isometry3d(estimate.at<gtsam::Pose3>(i).matrix()), frames_[i].cloud});
+      }
+      const auto count = writeOptimizedMap(snapshot, save_map_path_, save_map_voxel_size_);
+      message = "Saved " + std::to_string(snapshot.size()) + " keyframes, " +
+                std::to_string(count) + " points in map frame to " + save_map_path_;
+      RCLCPP_INFO(get_logger(), "%s", message.c_str());
+      return true;
+    }
+    catch (const std::exception &error)
+    {
+      message = error.what();
+      RCLCPP_ERROR(get_logger(), "Optimized map save failed: %s", message.c_str());
+      return false;
+    }
   }
 
   void LoopBackendNode::enqueueRegistration(RegistrationTask task)
@@ -1040,6 +1103,7 @@ namespace super_lio_slam
           return;
         task = std::move(registration_tasks_.front());
         registration_tasks_.pop_front();
+        registration_busy_ = true;
       }
       const auto begin = std::chrono::steady_clock::now();
       const double queue_ms = std::chrono::duration<double, std::milli>(begin - task.enqueued).count();
@@ -1075,7 +1139,7 @@ namespace super_lio_slam
                                         task.current_cloud, candidate.historical_index,
                                         candidate.have_pose_hint ? &hint : nullptr);
           }
-          else  // 或者其他方法
+          else // 或者其他方法
           {
             CloudPtr merged(new Cloud);
             const auto cap = std::max<std::size_t>(100,
@@ -1117,6 +1181,11 @@ namespace super_lio_slam
       RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
                            "Registration timing frame=%zu queue_wait=%.1f ms work=%.1f ms",
                            task.index, queue_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+      {
+        std::lock_guard<std::mutex> lock(registration_mutex_);
+        registration_busy_ = false;
+      }
+      registration_idle_cv_.notify_all();
     }
   }
 
@@ -1183,7 +1252,8 @@ namespace super_lio_slam
       have_map_transform_ = true;
       map_tf_dirty_ = true;
     }
-    publishCurrent(latest, true);
+    if (rclcpp::ok(get_node_base_interface()->get_context()))
+      publishCurrent(latest, true);
     RCLCPP_INFO(get_logger(), "Loop %zu -> %zu %s: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
                 historical, index, decisionText(true, "accepted").c_str(),
                 registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "GICP",

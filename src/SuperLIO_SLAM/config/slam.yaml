@@ -57,6 +57,11 @@ loop_backend_node:
     std_visualization_max_triangles: 100
     registration_queue_capacity: 2  # pending tasks; overflow evicts oldest detection only
     map_publish_stride: 30
+    # Export all retained backend keyframes using final PGO poses, independently
+    # of the visualization limits below. Relative paths resolve from launch cwd.
+    save_map_path: "map/optimized_map.pcd"
+    save_map_voxel_size: 0.2  # 0 streams every retained point without voxel fusion
+    save_map_on_shutdown: false
     map_max_keyframes: 2000
     map_max_points_per_keyframe: 1000
     map_voxel_size: 0.5

@@ -23,6 +23,7 @@
 #include <pcl/point_types.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -95,6 +96,8 @@ namespace super_lio_slam
     void commitLoop(std::size_t index, std::size_t historical,
                     const RegistrationObservation &observation);
     void requestMap(const builtin_interfaces::msg::Time &stamp);
+    bool saveOptimizedMap(std::string &message);
+    void waitForRegistration();
 
     void onKeyFrame(const super_lio_slam::msg::KeyFrame::SharedPtr msg);
     CloudPtr convertAndFilter(const sensor_msgs::msg::PointCloud2 &message) const;
@@ -150,6 +153,10 @@ namespace super_lio_slam
     rclcpp::Subscription<super_lio_slam::msg::KeyFrame>::SharedPtr keyframe_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr frontend_odom_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr frontend_imu_sub_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_map_service_;
+    std::string save_map_path_;
+    double save_map_voxel_size_ = 0.2;
+    bool save_map_on_shutdown_ = false;
 
     // 发布
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
@@ -184,6 +191,8 @@ namespace super_lio_slam
     std::mutex graph_mutex_;
     std::mutex registration_mutex_;
     std::condition_variable registration_cv_;
+    std::condition_variable registration_idle_cv_;
+    bool registration_busy_ = false;
     std::deque<RegistrationTask> registration_tasks_;
     std::size_t registration_queue_capacity_ = 2;
     std::size_t registration_tasks_dropped_ = 0;

@@ -13,6 +13,8 @@ int main(int argc, char **argv)
       rclcpp::ExecutorOptions(), 2);
   executor.add_node(node);
   executor.spin();
+  executor.remove_node(node);
+  node.reset(); // Drain registration and optional disk export before final shutdown.
   rclcpp::shutdown();
   return 0;
 }
