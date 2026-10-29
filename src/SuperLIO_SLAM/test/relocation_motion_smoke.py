@@ -19,6 +19,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, PointCloud2, PointField
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
+from visualization_msgs.msg import Marker
 
 
 def stamp(seconds):
@@ -79,6 +80,8 @@ def main():
         'lio.sensor.imu_nba':.0001,'lio.sensor.imu_nbg':.0001,
         'relocation.window_min_frames':8, 'relocation.keyframe_max_interval_s':.2,
         'relocation.registration_interval_s':.5, 'registration_voxel_size_m':.3,
+        'relocation.local_map_visualization_interval_s':.1,
+        'relocation.local_map_visualization_max_points':200,
         'fpfh_normal_radius_m':.8, 'fpfh_feature_radius_m':1.6,
     }
     import yaml
@@ -90,7 +93,9 @@ def main():
     log=log_path.open('w')
     rclpy.init()
     node=rclpy.create_node('relocation_motion_smoke')
-    poses=[]; states=[]; transforms=[]
+    poses=[]; states=[]; transforms=[]; previews=[]
+    preview_qos=QoSProfile(depth=10,durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    node.create_subscription(Marker,'/lio/relocation/local_map_preview',previews.append,preview_qos)
     node.create_subscription(Odometry,'/lio/odom',poses.append,1000)
     node.create_subscription(String,'/lio/relocation/status',lambda msg:states.append(msg.data),
         QoSProfile(depth=20,durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -146,6 +151,17 @@ def main():
             if poses and poses[-1].header.frame_id=='world' and poses[-1].header.stamp.sec+poses[-1].header.stamp.nanosec*1e-9>expected_end-.15:
                 break
         assert 'LOCAL_TRACKING' in states and 'WORLD_MAP_TRACKING' in states,log_tail()
+        additions=[marker for marker in previews if marker.action==Marker.ADD]
+        assert additions and all(0<len(marker.points)<=200 for marker in additions),'Missing/bounded local-map visualization failed'
+        assert all(marker.header.frame_id=='world' for marker in previews),'Preview must be visible in the RViz canvas'
+        assert previews[-1].action==Marker.DELETE,'Successful handoff left the local map visible'
+        late_previews=[]
+        late_sub=node.create_subscription(Marker,'/lio/relocation/local_map_preview',late_previews.append,preview_qos)
+        deadline=time.monotonic()+3
+        while not late_previews and time.monotonic()<deadline:
+            rclpy.spin_once(node,timeout_sec=.05)
+        assert late_previews and late_previews[-1].action==Marker.DELETE,'Late subscriber received stale local map'
+        node.destroy_subscription(late_sub)
         local_poses=[pose for pose in poses if pose.header.frame_id=='odom_local']
         world_poses=[pose for pose in poses if pose.header.frame_id=='world']
         assert len(local_poses)>=8 and len(world_poses)>=5,'Missing local/world scan tracking'
@@ -169,6 +185,7 @@ def main():
         old,latest,preserved=map(float,match.groups())
         assert latest>old and abs(latest-preserved)<1e-5,'Delayed registration rewound the filter'
         print(f'PASS: {len(local_poses)} local / {len(world_poses)} world poses; moving scan error max={max(errors):.4f} m; delayed handoff preserves time and TF')
+        print(f'PASS: {len(additions)} local-map previews, point cap, handoff DELETE and late-subscriber clearing')
         print(f'Artifacts: {folder}')
     finally:
         node.destroy_node(); rclpy.shutdown()

@@ -11,20 +11,20 @@ namespace super_lio_slam
 {
   using RegistrationCloud = pcl::PointCloud<pcl::PointXYZI>;
 
-  struct WindowEntry
+  struct WindowEntry // 每个窗口记录位姿和点云
   {
-    std::size_t index;
-    double stamp;
-    Eigen::Isometry3d odom_pose;
-    RegistrationCloud::ConstPtr cloud;
-    double distance = 0.0;
+    std::size_t index;                 // 索引
+    double stamp;                      // 时间戳
+    Eigen::Isometry3d odom_pose;       // 里程计位姿
+    RegistrationCloud::ConstPtr cloud; // 点云
+    double distance = 0.0;             // 距离值
   };
 
-  struct SubmapLimits
+  struct SubmapLimits                 // 子图限制
   {
-    int max_frames = 4;
-    double max_duration = 6.0;
-    double max_travel = 6.0;
+    int max_frames = 4;               // 最多帧数
+    double max_duration = 6.0;        // 最长时间
+    double max_travel = 6.0;          // 最长旅行距离
   };
 
   // Single-owner deque. Copies are small and share immutable single-frame clouds.
@@ -39,7 +39,7 @@ namespace super_lio_slam
 
   private:
     SubmapLimits limits_;
-    std::deque<WindowEntry> entries_;
+    std::deque<WindowEntry> entries_; // 多个窗口入口
   };
 
   struct RegistrationSettings

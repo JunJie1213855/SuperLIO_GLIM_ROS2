@@ -135,6 +135,11 @@ namespace LI2Sup
     status_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
     status_pub_ = node.create_publisher<std_msgs::msg::String>("/lio/relocation/status",
                                                                rclcpp::QoS(1).reliable().transient_local(), status_options);
+    visualize_local_map_ = node.declare_parameter<bool>("relocation.visualize_local_map", true);
+    local_map_preview_interval_ = positive("relocation.local_map_visualization_interval_s", 0.5);
+    local_map_preview_max_points_ = integer("relocation.local_map_visualization_max_points", 50000, 100, 1000000);
+    local_map_preview_pub_ = node.create_publisher<visualization_msgs::msg::Marker>(
+        "/lio/relocation/local_map_preview", rclcpp::QoS(1).reliable().transient_local(), status_options);
     setStatus("LOAD_REFERENCE_MAP");
     std::string map_path = node.declare_parameter<std::string>("relocation.map_path", "");
     if (map_path.empty())
@@ -414,6 +419,7 @@ namespace LI2Sup
 
     // 设置相关信号
     data_wrapper_->commitRelocationFrame(world_from_local);
+    publishLocalMapPreview(true);
     stage_ = Stage::World;
     ++generation_;
     stopping_ = true;
@@ -542,8 +548,56 @@ namespace LI2Sup
     Output();
   }
 
+  void SuperLIOReLoc::publishLocalMapPreview(bool clear)
+  {
+    if (!visualize_local_map_)
+      return;
+    using Marker = visualization_msgs::msg::Marker;
+    Marker marker;
+    marker.header.frame_id = "world";
+    marker.ns = "relocation_local_map_preview";
+    marker.id = 0;
+    marker.action = clear ? Marker::DELETE : Marker::ADD;
+    marker.type = Marker::POINTS;
+    marker.pose.orientation.w = 1.0;
+    if (!clear)
+    {
+      if (stage_ != Stage::Local || !local_ivox_ ||
+          local_map_preview_pub_->get_subscription_count() == 0 ||
+          (last_local_map_preview_time_ >= 0 &&
+           measures_.lidar.end_time - last_local_map_preview_time_ < local_map_preview_interval_))
+        return;
+      // Display-only placement in RViz's world canvas. Without a prior this is
+      // an arbitrary identity placement, NOT an estimated world<-local TF.
+      const SE3 placement = have_prior_ ? prior_pose_ * prior_local_pose_.inverse() : SE3();
+      std::vector<float> xyz;
+      local_ivox_->getMap(xyz);
+      const std::size_t count = xyz.size() / 3;
+      const std::size_t displayed = std::min(count, local_map_preview_max_points_);
+      marker.points.reserve(displayed);
+      for (std::size_t i = 0; i < displayed; ++i)
+      {
+        const auto index = (i * count / displayed) * 3;
+        const V3 p = placement * V3(xyz[index], xyz[index + 1], xyz[index + 2]);
+        geometry_msgs::msg::Point point;
+        point.x = p.x(); point.y = p.y(); point.z = p.z();
+        marker.points.push_back(point);
+      }
+      marker.scale.x = marker.scale.y = 0.08;
+      marker.color.r = 1.0;
+      marker.color.g = 0.8;
+      marker.color.b = 0.1;
+      marker.color.a = 1.0;
+      last_local_map_preview_time_ = measures_.lidar.end_time;
+    }
+    // A latched DELETE also clears the preview for RViz subscribers joining
+    // after handoff; stopping publication alone would leave the last map visible.
+    local_map_preview_pub_->publish(marker);
+  }
+
   void SuperLIOReLoc::Output()
   {
+    publishLocalMapPreview();
     const auto state = kf_->GetNavState();
     data_wrapper_->pub_odom(state);
     if (!g_visual_map)

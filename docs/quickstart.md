@@ -108,6 +108,8 @@ ros2 topic echo /lio/relocation/status --qos-durability transient_local --qos-re
 
 `WAITING_FOR_STATIONARY_IMU → LOCAL_TRACKING → WORLD_MAP_TRACKING` 表示初始化、局部 LIO、定位成功并进入参考地图跟踪。开始时需要短暂静止或低动态；默认不修改参考地图。
 
+RViz 的黄色 `LocalMapPreview` 显示局部 LIO 体素地图，定位成功后自动清除。它仅供观察建图质量：有初值时按初值摆放，无初值时在原点附近展示，不代表已对齐参考地图。默认每 0.5 秒刷新，最多显示 50000 点；在重定位 YAML 中用 `relocation.visualize_local_map: false` 关闭。
+
 在 `relocation.yaml` 中配置初值：
 
 ```yaml

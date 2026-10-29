@@ -9,20 +9,27 @@ namespace super_lio_slam
 {
   void SubmapWindow::append(WindowEntry entry)
   {
+    // 防止异常时间戳
     if (!std::isfinite(entry.stamp) || !entry.odom_pose.matrix().allFinite() || !entry.cloud)
       throw std::invalid_argument("invalid submap entry");
+    
+    // 非空对比时间，并且计算距离
     if (!entries_.empty())
     {
       if (entry.index <= entries_.back().index || entry.stamp < entries_.back().stamp)
         throw std::invalid_argument("submap index/time moved backwards; restart for a new session");
+      // 用平移计算距离
       entry.distance = entries_.back().distance +
                        (entry.odom_pose.translation() - entries_.back().odom_pose.translation()).norm();
     }
+
+    // 加入数据
     entries_.push_back(std::move(entry));
-    while (entries_.size() > 1 &&
-           (entries_.size() > static_cast<std::size_t>(std::max(1, limits_.max_frames)) ||
-            (limits_.max_duration > 0 && entries_.back().stamp - entries_.front().stamp > limits_.max_duration) ||
-            (limits_.max_travel > 0 && entries_.back().distance - entries_.front().distance > limits_.max_travel)))
+    // 最大帧数，最长时间，最大距离
+    while (entries_.size() > 1 &&  // 内部要有数据
+           (entries_.size() > static_cast<std::size_t>(std::max(1, limits_.max_frames)) || // 帧数
+           (limits_.max_duration > 0 && entries_.back().stamp - entries_.front().stamp > limits_.max_duration) || // 时间差
+           (limits_.max_travel > 0 && entries_.back().distance - entries_.front().distance > limits_.max_travel))) // 距离
       entries_.pop_front();
   }
   RegistrationCloud::Ptr SubmapWindow::cloud(double voxel, std::size_t cap) const
@@ -31,6 +38,7 @@ namespace super_lio_slam
     if (entries_.empty())
       return merged;
     const auto anchor_inverse = entries_.back().odom_pose.inverse();
+    // 点云拼接
     for (const auto &entry : entries_)
     {
       RegistrationCloud transformed;
@@ -38,6 +46,8 @@ namespace super_lio_slam
                                (anchor_inverse * entry.odom_pose).matrix().cast<float>().eval());
       *merged += transformed;
     }
+
+    // 降采样
     RegistrationCloud::Ptr filtered(new RegistrationCloud);
     if (voxel > 0)
     {
@@ -48,6 +58,7 @@ namespace super_lio_slam
     }
     else
       filtered = merged;
+    // 
     if (cap && filtered->size() > cap)
     {
       RegistrationCloud::Ptr capped(new RegistrationCloud);

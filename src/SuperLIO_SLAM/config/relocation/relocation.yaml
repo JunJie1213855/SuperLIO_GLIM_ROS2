@@ -6,6 +6,10 @@ relocation_node:
     lio.relocation.init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Empty means sensor YAML's lio.map.save_map_dir + lio.map.map_name.
     relocation.map_path: ""
+    # Yellow display-only local voxel map; removed on successful handoff.
+    relocation.visualize_local_map: true
+    relocation.local_map_visualization_interval_s: 0.5
+    relocation.local_map_visualization_max_points: 50000
     relocation.use_initial_pose: false
     relocation.map_crop_radius_m: 80.0  # 0 disables crop; no hint also uses the whole map
     relocation.window_min_frames: 5

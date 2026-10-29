@@ -10,7 +10,6 @@ namespace super_lio_slam
   // Poses and all returned source clouds refer to the fixed session frame S.
   RegistrationCloud::Ptr fixedFrameCloud(const SubmapWindow &window, double voxel,
                                          std::size_t max_points);
-
   struct RelocationSnapshot
   {
     std::uint64_t generation = 0;

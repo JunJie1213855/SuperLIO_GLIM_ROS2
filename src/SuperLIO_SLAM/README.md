@@ -165,6 +165,12 @@ ros2 launch super_lio_slam relocation.launch.py \
 成功后使用参考地图跟踪，默认不更新地图。TF 为 `world → odom_local → imu`；
 输出在定位前为 odom_local、成功后为 world。重定位不向回环后端发布关键帧。
 
+重定位 RViz 默认启用黄色 `LocalMapPreview`（`/lio/relocation/local_map_preview`，Marker）。
+配准前显示局部 LIO 的实际体素地图，成功提交后发布 DELETE 自动清除；迟加入的 RViz 也只收到清除状态。
+预览按初值摆放，无初值时使用原点作为展示位置，不能当作已估计的世界系坐标，也不发布额外 TF。
+`relocation.visualize_local_map` 控制开关，`relocation.local_map_visualization_interval_s` 默认 0.5 秒，
+`relocation.local_map_visualization_max_points` 默认 50000，仅影响显示。
+
 参数使用 `relocation_config` / `config/relocation/relocation.yaml`，初值为世界系
 `[x,y,z,roll,pitch,yaw]`（m / 度）。`/initialpose` 非零时间戳须属于传感器时间域，
 零时间戳关联当前状态；状态见 `/lio/relocation/status`。

@@ -56,6 +56,7 @@ namespace LI2Sup
     void caceData();
     void ProcessCaceMap();
 
+  protected:
     using StateFn = void (SuperLIO::*)();
     using OctVoxMapType = OctVoxMap<BASIC::V3, BASIC::scalar>;
     using KNNHeapType = KNNHeap<5, BASIC::V3>;

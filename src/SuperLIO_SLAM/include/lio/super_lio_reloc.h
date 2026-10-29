@@ -9,6 +9,7 @@
 #include <thread>
 #include <std_msgs/msg/string.hpp>
 #include <pcl/kdtree/kdtree_flann.h>
+#include <visualization_msgs/msg/marker.hpp>
 
 namespace LI2Sup
 {
@@ -37,13 +38,14 @@ namespace LI2Sup
     void setStatus(const std::string &status);
     void limitScan();
     void Output() override;
-
-    Stage stage_ = Stage::Bootstrap;
+    void publishLocalMapPreview(bool clear = false);
+  private:
+    Stage stage_ = Stage::Bootstrap;                 // 状态
     std::string status_;
-    OctVoxMapType::Ptr local_ivox_, reference_ivox_;
+    OctVoxMapType::Ptr local_ivox_, reference_ivox_; // 当前局部，参考
     BASIC::CloudPtr reference_cloud_;
     pcl::KdTreeFLANN<BASIC::PointType> reference_tree_;
-    super_lio_slam::SubmapWindow window_;
+    super_lio_slam::SubmapWindow window_;            // 局部子图窗口
     super_lio_slam::RegistrationSettings settings_;
     std::deque<IMUData> initialization_imu_;
     std::size_t imu_samples_ = 50;
@@ -64,5 +66,10 @@ namespace LI2Sup
     std::atomic<bool> stopping_{false};
     std::thread registration_thread_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr local_map_preview_pub_;
+    bool visualize_local_map_ = true;
+    double local_map_preview_interval_ = 0.5;
+    double last_local_map_preview_time_ = -1;
+    std::size_t local_map_preview_max_points_ = 50000;
   };
 } // namespace LI2Sup
