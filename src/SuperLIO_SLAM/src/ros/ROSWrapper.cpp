@@ -721,6 +721,8 @@ namespace LI2Sup
   //       
   bool ROSWrapper::sync_measure(MeasureGroup &meas)
   {
+    // LiDAR 与 IMU 使用原始传感器时间；/clock 不参与此处扫描区间覆盖判断。
+    // 等待 IMU 到达帧末后，取出不晚于帧末的样本；末端不足由 LIO 的传播逻辑补齐。
     if (lidar_buffer_.empty() || imu_buffer_.empty())
     {
       RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -766,6 +768,8 @@ namespace LI2Sup
 
   void ROSWrapper::pub_odom(const NavState &state)
   {
+    // 重定位前直接把 S 系数值标记为 world 预览，接管后发布已变换的真实 W 系状态。
+    // 始终只广播 world->imu，局部/世界轨迹的分段清理由 commitRelocationFrame 负责。
     nav_msgs::msg::Odometry odom;
     odom.header.frame_id = "world";
     odom.child_frame_id = "imu";
@@ -982,6 +986,8 @@ namespace LI2Sup
 
   void ROSWrapper::commitRelocationFrame(double sensor_time)
   {
+    // 接管会发生坐标跳变，必须清掉旧局部轨迹，避免在 Path 中画出局部原点到地图位置的长连线。
+    // 发布空 Path 立即清屏，再由下一次 pub_odom 从最新 W 系状态重新生成轨迹。
     // Discard both the provisional trajectory and its allocated storage before
     // Output() starts the aligned world trajectory at the latest sensor state.
     path_ = nav_msgs::msg::Path{};

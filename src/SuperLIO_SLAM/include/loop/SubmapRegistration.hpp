@@ -11,6 +11,7 @@ namespace super_lio_slam
 {
   using RegistrationCloud = pcl::PointCloud<pcl::PointXYZI>;
 
+  // 回环使用有限多帧子图，与重定位的固定 S 系累积地图是两种不同的数据组织方式。
   struct WindowEntry // 每个窗口记录位姿和点云
   {
     std::size_t index;                 // 索引
@@ -82,15 +83,16 @@ namespace super_lio_slam
 
   struct RegistrationResult
   {
+    // source -> target 的完整刚体变换；粗/精配准均沿用此方向，精配准结果已包含粗初值。
     bool accepted = false;
     std::string reason;
     Eigen::Matrix4d transform = Eigen::Matrix4d::Identity(); // historical <- current
     bool used_hint = false;
     std::size_t pairs = 0;
     std::size_t coarse_inliers = 0;
-    double coarse_rmse = 0.0;
+    double coarse_rmse = 0.0; // 米；对应点经过粗变换后的内点残差均方根
     std::size_t inliers = 0;
-    double mse = 0.0;
+    double mse = 0.0; // 平方米；精配准后源点在目标中找到半径内近邻的平均平方距离
     double overlap = 0.0;
     double current_overlap = 0.0;
     double coarse_ms = 0.0;

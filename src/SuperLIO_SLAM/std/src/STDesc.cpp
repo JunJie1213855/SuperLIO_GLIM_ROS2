@@ -304,6 +304,8 @@ void publish_std_pairs(
 void STDescManager::GenerateSTDescs(
     pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
     std::vector<STDesc> &stds_vec) {
+  // 描述子流水线：体素平面提取 -> 平面连接 -> 角点提取 -> 角点组三角形。
+  // 输入保持当前关键帧坐标系，利用三角形形状进行地点召回，不要求预先对齐到世界系。
   if (!input_cloud || config_setting_.voxel_size_ <= 0 ||
       !std::isfinite(config_setting_.voxel_size_)) {
     stds_vec.clear();
@@ -333,6 +335,7 @@ void STDescManager::GenerateSTDescs(
   // std::cout << "[Description] corners size:" << corner_points->size()
   //           << std::endl;
 
+  // 三角形描述几何形状，类似墙面/重复建筑可能给出相似描述子，因此不能直接视为可靠回环。
   // step4, generate stable triangle descriptors
   stds_vec.clear();
   build_stdesc(corner_points, stds_vec);
@@ -351,6 +354,8 @@ void STDescManager::SearchLoop(
     std::vector<std::pair<STDesc, STDesc>> &loop_std_pair,
     STDSearchDiagnostics *diagnostics,
     const std::function<bool(int)>& candidate_allowed) {
+  // STD->GICP 路径在此完成候选投票及平面几何评分；最终还须由外层 GICP 验收。
+  // candidate_allowed 提前施加后端时间/距离准入，避免最佳候选本身不合规却遮挡其他候选。
 
   if (diagnostics) *diagnostics = STDSearchDiagnostics{};
   loop_result = std::pair<int, double>(-1, 0);
@@ -409,6 +414,7 @@ void STDescManager::SearchLoop(
 
 bool STDescManager::CandidatePoseHint(const STDMatchList& candidate,
     std::pair<Eigen::Vector3d,Eigen::Matrix3d>& transform) {
+  // 多帧 TEASER 路径仅将三角形投票解当作 T_H_C 提示；该布尔值不是最终回环接受结论。
   double score=-1;
   int votes=0;
   std::vector<std::pair<STDesc,STDesc>> matches;
@@ -418,6 +424,7 @@ bool STDescManager::CandidatePoseHint(const STDMatchList& candidate,
 
 std::vector<STDMatchList> STDescManager::SearchCandidates(
     const std::vector<STDesc>& descriptors, STDSearchDiagnostics* diagnostics) {
+  // 只召回候选，不执行完整配准；后端可依次用 TEASER/GICP 验证多个候选。
   if (diagnostics) *diagnostics = STDSearchDiagnostics{};
   std::vector<STDMatchList> candidates;
   if (!descriptors.empty()) candidate_selector(descriptors, candidates, diagnostics);
@@ -425,6 +432,7 @@ std::vector<STDMatchList> STDescManager::SearchCandidates(
 }
 
 void STDescManager::AddSTDescs(const std::vector<STDesc> &stds_vec) {
+  // 即使本帧没有三角形也递增帧号，使 STD 库索引与后端连续关键帧索引保持一致。
   // The manager owns the contiguous frame ID, including frames with no descriptors.
   for (auto single_std : stds_vec) {
     single_std.frame_id_ = current_frame_id_;
@@ -1085,6 +1093,8 @@ void STDescManager::candidate_selector(
     const std::vector<STDesc> &stds_vec,
     std::vector<STDMatchList> &candidate_matcher_vec,
     STDSearchDiagnostics *diagnostics) {
+  // 在三角形边长哈希桶及邻桶中找相似描述子，再按历史帧汇总匹配票数形成候选列表。
+  // skip_near_num_ 是帧号间隔筛选；后端的秒级时间差/米级距离筛选是另外的准入条件。
   candidate_matcher_vec.clear();
   if (config_setting_.candidate_num_ <= 0 ||
       current_frame_id_ > static_cast<unsigned int>(std::numeric_limits<int>::max())) {
@@ -1213,6 +1223,8 @@ void STDescManager::candidate_verify(
     std::pair<Eigen::Vector3d, Eigen::Matrix3d> &relative_pose,
     std::vector<std::pair<STDesc, STDesc>> &sucess_match_vec,
     int *max_votes) {
+  // 从若干三角形对应生成刚体假设，检查其余三角形三个顶点是否都落入一致性距离阈值。
+  // 最高票假设再经过平面几何评分；重复结构仍可能投出错误初值，外层必须继续验证。
   sucess_match_vec.clear();
   if (max_votes) *max_votes = 0;
   if (candidate_matcher.match_list_.empty() ||

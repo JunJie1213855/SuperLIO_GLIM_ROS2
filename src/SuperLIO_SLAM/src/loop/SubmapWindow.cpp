@@ -9,6 +9,7 @@ namespace super_lio_slam
 {
   void SubmapWindow::append(WindowEntry entry)
   {
+    // 三个上限任一超出就从队首淘汰旧帧，但始终保留最新锚点帧。
     // 防止异常时间戳
     if (!std::isfinite(entry.stamp) || !entry.odom_pose.matrix().allFinite() || !entry.cloud)
       throw std::invalid_argument("invalid submap entry");
@@ -37,8 +38,10 @@ namespace super_lio_slam
     RegistrationCloud::Ptr merged(new RegistrationCloud);
     if (entries_.empty())
       return merged;
+    // 以队尾关键帧 A 的 IMU 系为子图坐标系：T_A_i = T_world_A^-1 * T_world_i。
+    // 因而队尾自身位姿为 I；源/目标各自锚定后，配准结果就是两个锚点间的相对测量。
     const auto anchor_inverse = entries_.back().odom_pose.inverse();
-    // 点云拼接
+    // 先按原始 LIO 相对位姿对齐所有成员，再统一降采样，不能直接拼接各自机体系中的点。
     for (const auto &entry : entries_)
     {
       RegistrationCloud transformed;
@@ -58,7 +61,7 @@ namespace super_lio_slam
     }
     else
       filtered = merged;
-    // 
+    // 超出点数上限时在整个子图内等间隔取样，限制配准开销而不只保留最后一帧。
     if (cap && filtered->size() > cap)
     {
       RegistrationCloud::Ptr capped(new RegistrationCloud);
@@ -70,6 +73,7 @@ namespace super_lio_slam
   }
   bool SubmapWindow::sharesFrames(const SubmapWindow &other) const
   {
+    // 两个子图共享帧会产生天然重合，可能把同一批点误判为可靠回环，因此需在配准前拒绝。
     for (const auto &a : entries_)
       for (const auto &b : other.entries_)
         if (a.index == b.index)

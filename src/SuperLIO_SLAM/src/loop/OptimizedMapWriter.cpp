@@ -41,6 +41,8 @@ namespace super_lio_slam
   std::size_t writeOptimizedMap(const std::vector<OptimizedMapFrame> &frames,
                                 const std::string &path, double voxel_size)
   {
+    // 输入每帧的最终 T_map_I 和机体系点云，导出 map 系 PCD，而不是把 RViz 的显示点云直接保存。
+    // voxel_size=0 逐点流式写；正数则累计体素质心，额外内存随占用体素数增长。
     if (path.empty() || !std::isfinite(voxel_size) || voxel_size < 0)
       throw std::invalid_argument("save path must be nonempty and voxel size finite and nonnegative");
     const auto output = std::filesystem::absolute(path);
@@ -79,6 +81,7 @@ namespace super_lio_slam
         {
           if (!point.getVector3fMap().allFinite())
             continue;
+          // 每帧应用各自的优化位姿；单个全局刚体变换无法代替 PGO 对历史轨迹的非刚性校正。
           const Eigen::Vector3d p = frame.pose * point.getVector3fMap().cast<double>();
           if (!p.allFinite() || p.cwiseAbs().maxCoeff() > std::numeric_limits<float>::max())
             throw std::runtime_error("Transformed point outside float PCD range");
@@ -112,6 +115,7 @@ namespace super_lio_slam
       stream << std::setw(20) << count;
       stream.close();
       // Same-filesystem rename keeps the previous complete map on write failure.
+      // 仅完整写入成功后原子替换目标路径，写入异常时保留原有完整地图。
       std::filesystem::rename(pattern, output);
       return count;
     }

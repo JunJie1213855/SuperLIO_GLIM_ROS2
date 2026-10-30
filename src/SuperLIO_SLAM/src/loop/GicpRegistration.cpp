@@ -20,7 +20,8 @@ namespace super_lio_slam
     };
   }
 
-  // 精配准
+  // 精配准保持 source->target 的变换方向；GICP 利用局部协方差约束点云对齐。
+  // coarse_pass 只允许进入本函数，最终还需覆盖率、残差及几何可观性验收。
   RegistrationResult refineRegister(const RegistrationCloud::ConstPtr &source,
                                     const RegistrationCloud::ConstPtr &target,
                                     const RegistrationCloud::ConstPtr &current,
@@ -29,6 +30,7 @@ namespace super_lio_slam
   {
     if (!out.accepted)
       return out;
+    // 先撤销粗配准的通过标记，任何精配准中途失败都必须返回拒绝结果。
     out.accepted = false;
     const auto begin = std::chrono::steady_clock::now();
     auto finish = [&](const std::string &reason)
@@ -63,16 +65,19 @@ namespace super_lio_slam
 
     // 开始对齐
     gicp.align(aligned, coarse.cast<float>());
+    // PCL 返回的已是含粗初值的总变换，不能再次乘 coarse，否则会发生重复变换。
     out.transform = gicp.getFinalTransformation().cast<double>(); // already includes coarse initial guess
     if (!gicp.hasConverged() || aligned.empty() || !validRigidTransform(out.transform))
       return finish("gicp_not_converged");
+    // 限制的是粗解到精解的修正量，而不是传感器距地图原点的绝对位置/角度。
     const Eigen::Matrix4d correction = coarse.inverse() * out.transform;
     if (correction.block<3, 1>(0, 3).norm() > s.max_translation ||
         Eigen::AngleAxisd(correction.block<3, 3>(0, 0)).angle() * 180.0 / M_PI > s.max_rotation_deg)
       return finish("excessive_refinement");
     pcl::KdTreeFLANN<pcl::PointXYZI> tree;
     tree.setInputCloud(target);
-    // 配准质量
+    // 用固定半径内最近邻独立评分，不直接采用 GICP 的内部收敛标志作为质量结论。
+    // KD-tree 返回平方距离：阈值需平方，mse 的单位为 m^2，区别于粗阶段的 RMSE（m）。
     auto quality = [&](const RegistrationCloud &points, double &mse)
     {
       std::size_t count = 0;
@@ -91,6 +96,8 @@ namespace super_lio_slam
     };
     out.inliers = quality(aligned, out.mse);
     out.overlap = static_cast<double>(out.inliers) / aligned.size();
+    // 子图整体重合还不足以证明当前帧定位正确，另查当前扫描，防止只有旧帧“撑高”覆盖率。
+    // 调用方必须保证 current 与 source 已处于同一源坐标系。
     RegistrationCloud current_aligned;
     pcl::transformPointCloud(*current, current_aligned, out.transform.cast<float>().eval());
     double current_mse = 0;
@@ -109,6 +116,8 @@ namespace super_lio_slam
     const double scale = std::sqrt(scale_squared / aligned.size());
     if (scale < 1e-6)
       return finish("degenerate_geometry");
+    // 由目标协方差的最小特征向量近似局部法向，累加归一化的点到面 J*J^T。
+    // 这只是几何退化诊断，不作为经过标定的配准协方差交给 PGO/ESKF。
     Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Zero();
     std::vector<int> ids(1);
     std::vector<float> distances(1);
@@ -132,6 +141,7 @@ namespace super_lio_slam
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> eigen(information);
     if (eigen.info() != Eigen::Success || eigen.eigenvalues()[5] <= 0)
       return finish("degenerate_geometry");
+    // 最小/最大特征值比过小，说明至少一个运动方向约束很弱；低 MSE 也可能是退化解。
     out.information_ratio = std::max(0.0, eigen.eigenvalues()[0]) / eigen.eigenvalues()[5];
     if (out.information_ratio < s.min_information_ratio)
       return finish("degenerate_geometry");

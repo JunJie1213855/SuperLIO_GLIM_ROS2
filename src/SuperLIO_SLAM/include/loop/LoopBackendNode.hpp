@@ -46,6 +46,8 @@ namespace super_lio_slam
 
     struct Frame
     {
+      // 两套位姿分开保存：odom_pose 是连续前端 world<-I，map_pose 是 PGO 后 map<-I。
+      // cloud 始终保留在该关键帧 IMU 系；地图发布/导出时才乘优化位姿。
       uint32_t input_id = 0;
       builtin_interfaces::msg::Time stamp;
       gtsam::Pose3 odom_pose;
@@ -55,6 +57,7 @@ namespace super_lio_slam
 
     struct RegistrationObservation
     {
+      // 测量方向为历史帧 H <- 当前帧 C，与 BetweenFactor(H,C) 的 X_H^-1 X_C 一致。
       gtsam::Pose3 historical_from_current;
       double fitness = 0.0;
       double overlap = 0.0;
@@ -73,6 +76,7 @@ namespace super_lio_slam
     };
     struct RegistrationTask
     {
+      // 任务快照固定源帧和候选子图；允许后台完成时图里已插入更新的关键帧。
       std::size_t index = 0;
       CloudPtr current_cloud;
       SubmapWindow source_window;
@@ -188,6 +192,7 @@ namespace super_lio_slam
     uint32_t last_input_id_ = 0;
     std::atomic<bool> backend_faulted_{false};
     // Graph and published pose state are short-held; no registration/map work under this mutex.
+    // graph_mutex_ 保护图、frames_ 和优化位姿；配准/地图线程在锁外处理点云快照。
     std::mutex graph_mutex_;
     std::mutex registration_mutex_;
     std::condition_variable registration_cv_;

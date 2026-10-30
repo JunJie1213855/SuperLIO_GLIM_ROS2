@@ -22,6 +22,8 @@ namespace LI2Sup
     void process() override;
 
   private:
+    // Bootstrap：静止 IMU 初始化；Local：S 系建图并异步配准；World：地图 W 系定位。
+    // Failed 用于时间回退等无法安全延续当前会话的错误。
     enum class Stage
     {
       Bootstrap,
@@ -67,6 +69,7 @@ namespace LI2Sup
     std::size_t local_frame_count_ = 0;
     std::mutex registration_mutex_;
     std::condition_variable registration_cv_;
+    // 前台只保留一个最新待处理快照，后台只运行一个任务，避免慢配准积累无限队列。
     std::optional<super_lio_slam::RelocationSnapshot> pending_task_;
     std::optional<super_lio_slam::RelocationResult> pending_result_;
     std::atomic<bool> stopping_{false};

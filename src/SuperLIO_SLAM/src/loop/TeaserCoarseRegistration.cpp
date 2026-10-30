@@ -28,6 +28,8 @@ namespace super_lio_slam
     };
     Features features(const RegistrationCloud::ConstPtr &cloud, const RegistrationSettings &s)
     {
+      // 法向使用 normal_radius 的邻域，FPFH 使用更大的 feature_radius 邻域描述局部形状。
+      // 特征匹配只给出可能的对应点，是否几何一致仍需 TEASER 和后续残差验收。
       pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
       pcl::PointCloud<pcl::FPFHSignature33> descriptors;
       auto compute = [&](auto &normal_estimation, auto &fpfh)
@@ -85,6 +87,7 @@ namespace super_lio_slam
     }
     bool spread(const Eigen::Matrix<double, 3, Eigen::Dynamic> &points, double baseline)
     {
+      // 要求足够空间跨度且不近似共线；允许平面分布，完整 6 自由度退化检查在精配准阶段进行。
       const auto centered = (points.colwise() - points.rowwise().mean()).eval();
       const Eigen::Vector3d sv = Eigen::JacobiSVD<Eigen::MatrixXd>(centered).singularValues();
       return (points.rowwise().maxCoeff() - points.rowwise().minCoeff()).norm() >= baseline &&
@@ -94,7 +97,8 @@ namespace super_lio_slam
 
 
 
-  // 粗配准实现
+  // 粗配准：输入分别在 source/target 自身坐标系中，求 p_target ≈ R*p_source+t。
+  // 回环时即 T_H_C，重定位时即 T_W_S；STD 候选检索不等同于这里的几何配准。
   RegistrationResult coarseRegister(const RegistrationCloud::ConstPtr &source,
                                     const RegistrationCloud::ConstPtr &target,
                                     const RegistrationSettings &s, const Eigen::Matrix4d *hint)
@@ -129,6 +133,8 @@ namespace super_lio_slam
     std::vector<float> distances(2), reverse(1);
     if (s.feature_matching == "nearest")
     {
+      // 全局重定位配置：单向 FPFH 最近邻，保留较宽的对应集合交给 TEASER 筛选。
+      // 此分支不使用 ratio、互选或位姿提示的空间门限；相似结构产生的错误对应仍可能很多。
       // Global relocation: retain a broad pool of one-way matches and let
       // TEASER++ select the consistent subset, as in teaserpp_registration.
       auto finite = [](const pcl::FPFHSignature33 &feature)
@@ -159,6 +165,8 @@ namespace super_lio_slam
     }
     else
     {
+      // 互选配置：最近/次近描述子距离比 + 反向一致性；有提示时只在提示附近搜索对应。
+      // 这条分支通常更保守，不能把它的对应点数量与单向 nearest 配置直接等同比较。
       src_tree.setInputCloud(src.descriptors);
       dst_tree.setInputCloud(dst.descriptors);
       if (hint)
@@ -262,6 +270,8 @@ namespace super_lio_slam
     if (!spread(a, s.min_baseline) || !spread(b, s.min_baseline))
       return finish("degenerate_pairs");
     teaser::RobustRegistrationSolver::Params params;
+    // LiDAR 地图具有米制尺度，只估计旋转和平移；noise_bound 是 TEASER 的噪声界，单位为米。
+    // 最大团模式/预算影响对应筛选耗时，GNC_TLS 用于鲁棒旋转估计。
     params.estimate_scaling = false;
     params.noise_bound = s.noise_bound;
     params.rotation_max_iterations = s.rotation_iterations;
@@ -280,6 +290,8 @@ namespace super_lio_slam
     out.transform.block<3, 1>(0, 3) = solution.translation;
     if (!solution.valid || !validRigidTransform(out.transform))
       return finish("invalid_teaser_transform");
+    // 不直接把 solver.valid 当作成功：按 ||R*a_k+t-b_k|| 重算对应内点、比例和 RMSE。
+    // RMSE 只统计阈值内的点，因此必须同时检查内点数量/比例，避免少量偶然点的低残差。
     std::vector<int> inliers;
     double squared_error = 0.0;
     for (int k = 0; k < a.cols(); ++k)
@@ -306,6 +318,7 @@ namespace super_lio_slam
       ai.col(k) = a.col(inliers[k]);
       bi.col(k) = b.col(inliers[k]);
     }
+    // 初始对应点分布良好仍不够，筛选后剩下的内点也须具有足够的几何跨度。
     if (!spread(ai, s.min_baseline) || !spread(bi, s.min_baseline))
       return finish("degenerate_coarse_inliers");
     out.accepted = true;

@@ -415,6 +415,8 @@ namespace super_lio_slam
       const SubmapWindow &source_window, const SubmapWindow &target_window, const CloudPtr &current_cloud,
       std::size_t historical_index, const Eigen::Matrix4d *hint) const
   {
+    // 源子图锚定当前帧 C，目标子图锚定历史帧 H，各自内部用原始 LIO 相对位姿拼接。
+    // 因此配准直接返回 T_H_C，无需在入图前额外乘锚点位姿。
     if (source_window.sharesFrames(target_window))
     {
       RCLCPP_DEBUG(get_logger(), "Submap %zu %s: stage=%s", historical_index,
@@ -433,6 +435,7 @@ namespace super_lio_slam
     // 如果可以接受，就进行精配准，采用 GICP
     if (result.accepted)
       result = refineRegister(source, target, current, settings, result);
+    // 提示可能来自错误的重复结构；有提示的粗/精配准失败后，以相同验收标准无提示重试。
     // Hints reduce repeated-structure ambiguity but never gate candidate admission.
     // Retry without the hint if either registration stage rejects the hinted pairs.
     if (!result.accepted && hint)
@@ -478,6 +481,7 @@ namespace super_lio_slam
   void LoopBackendNode::addGraphNode(
       std::size_t index, const gtsam::Pose3 &raw_pose)
   {
+    // 图变量 X_i = T_map_Ii。首帧先验固定全局自由度，后续边来自未经 PGO 改写的 LIO 相对运动。
     gtsam::NonlinearFactorGraph factors;
     gtsam::Values initial;
     if (index == 0)
@@ -487,6 +491,7 @@ namespace super_lio_slam
     }
     else
     {
+      // Z_(i-1,i) = T_world_I(i-1)^-1 * T_world_Ii；新节点初值接在上一优化位姿后面。
       const auto raw_delta = frames_[index - 1].odom_pose.between(raw_pose);
       factors.add(gtsam::BetweenFactor<gtsam::Pose3>(index - 1, index,
                                                      raw_delta, odom_noise_));
@@ -497,6 +502,7 @@ namespace super_lio_slam
     frames_[index].map_pose = isam_.calculateEstimate<gtsam::Pose3>(index);
     {
       std::lock_guard<std::mutex> lock(map_tf_mutex_);
+      // 同一关键帧的两套位姿相消，得到 T_map_world = T_map_I * T_world_I^-1。
       map_from_world_ = frames_[index].map_pose.compose(raw_pose.inverse());
       have_map_transform_ = true;
       map_tf_dirty_ = true;
@@ -506,6 +512,8 @@ namespace super_lio_slam
   void LoopBackendNode::onKeyFrame(
       const super_lio_slam::msg::KeyFrame::SharedPtr msg)
   {
+    // 阅读主线：预处理/候选召回 -> 关键帧入库及里程计因子 -> 异步几何验证 -> commitLoop。
+    // 本回调独占 STD 状态；重计算交给配准线程，关键帧和里程计边不能因配准排队而丢失。
     if (backend_faulted_)
       return;
     if (have_input_id_ && msg->id <= last_input_id_)
@@ -552,7 +560,7 @@ namespace super_lio_slam
                                                   static_cast<std::size_t>(loop_min_interval_);
     }
 
-    // 累积滑动窗口
+    // 仅回环 std_teaser_gicp 维护有限多帧窗口；不要与重定位的固定 S 系累积地图混淆。
     auto pending_window = source_window_;
     if (registration_mode_ == "std_teaser_gicp")
     {
@@ -581,6 +589,7 @@ namespace super_lio_slam
     bool adding_descriptors = false;
     double descriptor_ms = 0.0;
     const auto std_begin = std::chrono::steady_clock::now();
+    // candidate_mode 只决定“找谁”；registration_mode 决定“如何验证”，二者独立配置。
     if (candidate_mode_ == "distance") // 采用距离决定候选帧
     {
       if (enough_time_since_loop)
@@ -646,6 +655,7 @@ namespace super_lio_slam
       try
       {
         // Only this callback owns STD state; workers consume immutable snapshots.
+        // 当前帧先生成描述子并查询历史库，搜索完成后才插入，避免把自身召回成回环。
         std_manager_.GenerateSTDescs(cloud, descriptors); // 生成 STD 描述子
         descriptor_ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - std_begin)
@@ -654,6 +664,7 @@ namespace super_lio_slam
         {
           if (registration_mode_ == "std_teaser_gicp")
           {
+            // STD 在此只负责地点召回；时间/距离准入及 TEASER/GICP 验收通过后才形成回环边。
             const auto candidates = std_manager_.SearchCandidates(descriptors); // 查看候选
             std::vector<int> tried;
             for (const auto &candidate : candidates)
@@ -679,6 +690,7 @@ namespace super_lio_slam
               RegistrationCandidate match;
               match.historical_index = static_cast<std::size_t>(h);
               // STD retrieves places; a failed pose hint does not reject a candidate.
+              // 三角形一致性给出 T_H_C 初值；缺少可靠初值仍可让 TEASER 无提示尝试配准。
               match.have_pose_hint = std_manager_.CandidatePoseHint(candidate, match.proposal);
               // Snapshot raw poses/clouds briefly; assembling/downsampling is a worker task.
               {
@@ -774,6 +786,7 @@ namespace super_lio_slam
       }
     }
 
+    // 至此图节点已初始化，后台延迟结果只需连接既有节点，不需要重新插入节点初值。
     source_window_ = std::move(pending_window);
     last_input_id_ = msg->id;
     have_input_id_ = true;
@@ -841,6 +854,8 @@ namespace super_lio_slam
 
   void LoopBackendNode::publishMapToWorld()
   {
+    // TF 链为 map->world->imu：前端维持连续 world 轨迹，后端用 map->world 反映当前全局校正。
+    // 历史各帧优化量通常不同；一条 TF 只能修正当前前端输出，历史地图仍须逐帧重建。
     std::lock_guard<std::mutex> lock(map_tf_mutex_);
     if (!have_map_transform_ || !latest_data_stamp_)
       return;
@@ -883,6 +898,8 @@ namespace super_lio_slam
 
   void LoopBackendNode::publishMap(const MapSnapshot &snapshot)
   {
+    // 按每帧独立的优化位姿摆放原始机体系点云，才会得到随 PGO 形变后的历史地图。
+    // 此处是显示地图，可按帧数/点数限流；完整地图导出使用独立的全量快照。
     const auto &frames = snapshot.frames;
     CloudPtr merged(new Cloud);
     const std::size_t limit = map_max_keyframes_ > 0
@@ -1043,6 +1060,7 @@ namespace super_lio_slam
 
   bool LoopBackendNode::saveOptimizedMap(std::string &message)
   {
+    // 在图锁内冻结所有已保留关键帧的最终优化位姿，锁外逐点写文件，避免 I/O 长时间占图锁。
     try
     {
       std::vector<OptimizedMapFrame> snapshot;
@@ -1071,6 +1089,7 @@ namespace super_lio_slam
 
   void LoopBackendNode::enqueueRegistration(RegistrationTask task)
   {
+    // 队列过载只丢最旧的待配准任务，frames_ 和里程计因子保留，避免轨迹图断链。
     task.enqueued = std::chrono::steady_clock::now(); // 入队时间
     {
       std::lock_guard<std::mutex> lock(registration_mutex_);
@@ -1114,7 +1133,7 @@ namespace super_lio_slam
           if (stopping_ || backend_faulted_)
             break;
           {
-            // 再次检测时间
+            // 任务等待期间可能已有其他回环提交，重查准入及回环冷却间隔，避免密集重复加边。
             std::lock_guard<std::mutex> lock(graph_mutex_);
             if (!loopCandidateEligible(frames_[task.index].stamp, frames_[task.index].odom_pose,
                                        candidate.historical_index))
@@ -1128,7 +1147,7 @@ namespace super_lio_slam
                         candidate.historical_index, task.index, candidate.proposal.first.norm());
           std::unique_ptr<RegistrationObservation> observation;
 
-          // 两种验证、获取测量的方式
+          // 两条几何验证路径最终都返回 T_H_C：多帧 TEASER+GICP，或 STD 初值直接 GICP。
           if (registration_mode_ == "std_teaser_gicp")
           {
             Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
@@ -1167,6 +1186,7 @@ namespace super_lio_slam
               commitLoop(task.index, candidate.historical_index, *observation);
             break;
           }
+          // 预算只在候选之间检查，无法硬中断正在执行的单次 TEASER/GICP 求解。
           if (std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - begin)
                   .count() > registration_budget_ms_)
@@ -1192,6 +1212,7 @@ namespace super_lio_slam
   bool LoopBackendNode::loopTimeEligible(
       const builtin_interfaces::msg::Time &current, std::size_t historical) const
   {
+    // 使用两帧采集时间差，而非后台入队/计算耗时；严格大于配置值，等于门限也拒绝。
     if (historical >= frames_.size())
       return false;
     // Subtract integer nanoseconds before comparing: exactly 30 s is rejected.
@@ -1211,6 +1232,8 @@ namespace super_lio_slam
   void LoopBackendNode::commitLoop(std::size_t index, std::size_t historical,
                                    const RegistrationObservation &observation)
   {
+    // 调用方持 graph_mutex_；配准的是旧任务帧 index，不应把最新位姿直接重置为这个旧帧。
+    // 只加入 Z_H_C 约束，由整张图共同调整历史与当前节点。
     // graph_mutex_ held. A delayed result connects existing nodes; it never inserts
     // another initial value or resets the current pose to the old task's pose.
     if (index >= frames_.size() || historical >= index ||
@@ -1220,18 +1243,21 @@ namespace super_lio_slam
     try
     {
       gtsam::NonlinearFactorGraph factors;
+      // 因子残差对应 Log(Z_H_C^-1 * X_H^-1 * X_C)，测量方向不能取反。
       factors.add(gtsam::BetweenFactor<gtsam::Pose3>(historical, index,
                                                      observation.historical_from_current, loop_noise_));
       // Existing nodes were initialized from odometry before this delayed loop.
       // Refresh the robust weights/linearization, instead of relying on the
       // default ten-update cadence or on seeding a newly inserted loop node.
       gtsam::ISAM2UpdateParams parameters;
+      // 回环会影响已有节点，强制重线性化/完整求解，并额外更新以传播修正。
       parameters.force_relinearize = true;
       parameters.forceFullSolve = true;
       isam_.update(factors, gtsam::Values{}, parameters);
       for (int iteration = 0; iteration < 3; ++iteration)
         isam_.update(gtsam::NonlinearFactorGraph{}, gtsam::Values{}, parameters);
       const auto estimate = isam_.calculateEstimate();
+      // 必须刷新全部节点的 map_pose；只改回环两端会让轨迹和历史地图仍使用旧结果。
       for (std::size_t j = 0; j < frames_.size(); ++j)
         frames_[j].map_pose = estimate.at<gtsam::Pose3>(j);
     }
@@ -1248,6 +1274,7 @@ namespace super_lio_slam
     const auto latest = frames_.size() - 1;
     {
       std::lock_guard<std::mutex> lock(map_tf_mutex_);
+      // 使用最新图节点计算全局校正，而非使用刚完成配准的旧任务节点。
       map_from_world_ = frames_[latest].map_pose.compose(frames_[latest].odom_pose.inverse());
       have_map_transform_ = true;
       map_tf_dirty_ = true;
@@ -1262,6 +1289,7 @@ namespace super_lio_slam
 
   void LoopBackendNode::requestMap(const builtin_interfaces::msg::Time &stamp)
   {
+    // 图锁内只复制位姿和共享点云指针；锁外地图线程负责耗时拼接，待处理快照只保留最新一份。
     // Called under graph_mutex_. Shared cloud pointers are immutable after ingest.
     MapSnapshot snapshot;
     const std::size_t limit = map_max_keyframes_ > 0 ? static_cast<std::size_t>(map_max_keyframes_) : frames_.size();

@@ -5,6 +5,8 @@ using namespace BASIC;
 
 namespace LI2Sup
 {
+  // 18 维误差状态顺序：[dtheta, dp, dv, dbg, dba, dg]，每项均为 3 维。
+  // 姿态采用右扰动 R_true = R * Exp(dtheta)，位置/速度/重力误差在参考系中表达。
 
   /// [1] SEfB: P195：（7.37a） P203: (7.76a) (7.77a)  P220: Table 7-2
   /// [2] VSLAM14: P71: (4.26)  P73: (4.32)
@@ -104,6 +106,7 @@ namespace LI2Sup
 
   void ESKF::InitializePrediction(const SysState &state, const IMUData &last_imu)
   {
+    // 同时初始化扫描滤波状态、IMU 高频外推状态及时间锚点，避免首帧出现虚假的大 dt。
     SetX(state);
     last_imu_ = last_imu;
     last_imu_time_ = last_imu.secs;
@@ -120,17 +123,22 @@ namespace LI2Sup
   void ESKF::ChangeReferenceFrame(const SE3 &transform, double position_variance,
                                   double rotation_variance)
   {
+    // 重定位接管：transform = T_W_S，表示同一物理状态从固定局部系 S 改写到地图系 W。
+    // 这是坐标重表达，不是一次 Kalman 观测更新；传感器时间和机体系 IMU 零偏保持原值。
     const M3 A = transform.R_;
     if (!A.allFinite() || !transform.t_.allFinite() ||
         (A.transpose() * A - M3::Identity()).norm() > 1e-3 || std::abs(A.determinant() - 1) > 1e-3 ||
         !std::isfinite(position_variance) || position_variance < 0 ||
         !std::isfinite(rotation_variance) || rotation_variance < 0)
       throw std::invalid_argument("invalid ESKF reference transform or uncertainty");
+    // 左乘参考系旋转 A 后，右姿态误差仍在原机体系表达，因此 dtheta 的块为 I。
+    // dp、dv、dg 要乘 A；完整 J P J^T 会同时变换它们与其他状态的交叉协方差。
     M18 J = M18::Identity();
     J.block<3, 3>(3, 3) = A;
     J.block<3, 3>(6, 6) = A;
     J.block<3, 3>(15, 15) = A;
     P_ = (J * P_ * J.transpose()).eval();
+    // 配准不确定性目前用人工设置的方差膨胀近似，尚非完整的配准协方差传播模型。
     P_.block<3, 3>(0, 0) += rotation_variance * M3::Identity();
     P_.block<3, 3>(3, 3) += position_variance * M3::Identity();
     P_ = ((P_ + P_.transpose()) * .5f).eval();
@@ -139,6 +147,7 @@ namespace LI2Sup
     v_ = A * v_;
     g_ = A * g_;
     global_acc_ = A * global_acc_;
+    // 高频预测缓存也必须同步变换，否则下一条 IMU 输出会回到旧局部系。
     fw_R_ = SO3(A * fw_R_.R_);
     fw_p_ = A * fw_p_ + transform.t_;
     fw_v_ = A * fw_v_;
@@ -167,6 +176,7 @@ namespace LI2Sup
 
   void ESKF::Update()
   {
+    // 把误差增量注入名义状态：姿态右乘 Exp，欧氏分量直接相加，重力模长重新约束。
     R_ = R_ * SO3::Exp(dx_.template block<3, 1>(0, 0));
     p_ += dx_.template block<3, 1>(3, 0);
     v_ += dx_.template block<3, 1>(6, 0);
@@ -185,6 +195,8 @@ namespace LI2Sup
 
   bool ESKF::Predict(const IMUData &imu, DynamicState &state_imu, DynamicState &state_robot)
   {
+    // IMU 频率的独立外推分支：更新 fw_* 并输出高频位姿，不在这里传播扫描滤波协方差 P。
+    // 每次 LiDAR 观测注入后，Update() 会用校正后的名义状态重新锚定该分支。
     if (!init_)
     {
       return false;
@@ -239,6 +251,7 @@ namespace LI2Sup
 
   bool ESKF::Predict(const IMUData &imu)
   {
+    // 扫描滤波分支同时传播名义状态和 P；积分区间裁剪到相邻 LiDAR 观测时刻之间。
 
     if (last_imu_time_ < 0)
     {
@@ -271,6 +284,7 @@ namespace LI2Sup
       dt = imu.secs - last_imu_time_;
     }
 
+    // 相邻 IMU 均值用于本段积分，先扣零偏；加速度转入参考系后再加重力。
     V3 acc = 0.5 * (imu.acc + last_imu_.acc);
     acc = imu_scale_ * acc;
     acc = acc - ba_;
@@ -291,9 +305,11 @@ namespace LI2Sup
     F_W f_w = F_W::Zero();
     f_w.template block<3, 3>(0, 0) = -Jr_dt;
     f_w.template block<3, 3>(6, 3) = -R_dt;                // v -> na
-    f_w.template block<3, 3>(9, 6) = M3::Identity() * dt;  // ba
-    f_w.template block<3, 3>(12, 9) = M3::Identity() * dt; // bg
+    f_w.template block<3, 3>(9, 6) = M3::Identity() * dt;  // 陀螺零偏随机游走
+    f_w.template block<3, 3>(12, 9) = M3::Identity() * dt; // 加速度零偏随机游走
 
+    // 离散误差传播：P_next = F_x P F_x^T + F_w Q F_w^T。
+    // F_x 的姿态-零偏、速度-姿态/零偏/重力等块负责建立状态间相关性。
     P_ = f_x * P_ * f_x.transpose() + f_w * Q_ * f_w.transpose();
 
     global_acc_ = R_.R() * acc + g_;
@@ -309,6 +325,8 @@ namespace LI2Sup
   const int STATE_DIM = 18;
   bool ESKF::UpdateObserve(ESKF::ObsFunc obs)
   {
+    // 迭代误差状态更新：整帧共享同一个 IMU 传播先验，每轮只重线性化 LiDAR 观测。
+    // 若把每轮结果当作新的独立观测先验，会重复计入同一帧信息并使 P 过度收缩。
     // propagated state
     SO3 R_pred = R_;
     V3 p_pred = p_;
@@ -335,6 +353,7 @@ namespace LI2Sup
         need_converge_ = true;
       }
 
+      // 回调提供当前位姿处的点到面信息矩阵及负梯度，不在 ESKF 内部保存点云。
       obs(GetKFState(), HTVH, HTVr);
 
       V18 dx_prior = V18::Zero();
@@ -351,6 +370,7 @@ namespace LI2Sup
 
       G_prior.template block<3, 3>(0, 0) = J_prior;
 
+      // 姿态迭代改变误差切空间，先把固定先验协方差搬到当前线性化点再求增量。
       Pk = G_prior * P_pred * G_prior.transpose();
 
       dx_prior = G_prior * dx_prior;
@@ -360,6 +380,8 @@ namespace LI2Sup
       HTRH.template block<6, 6>(0, 0) = HTVH;
 
       // information form
+      // 信息形式融合：Qk = (Pk^-1 + H^T V^-1 H)^-1。
+      // 测量虽只有位姿列，完整 18 维求解仍保留速度、零偏和重力的相关性。
       M18 A = Pk.inverse() + HTRH;
       Qk = A.inverse();
 
@@ -381,6 +403,7 @@ namespace LI2Sup
 
     P_ = Qk;
 
+    // 名义姿态注入后将误差均值重置为零，同时变换 P 到新的右扰动切空间。
     M18 G_reset = M18::Identity();
     M3 J_reset = M3::Identity() - 0.5 * SO3::hat(dx_.template block<3, 1>(0, 0));
 

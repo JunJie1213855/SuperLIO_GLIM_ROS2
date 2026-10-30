@@ -45,6 +45,8 @@ namespace LI2Sup
 
   void SuperLIOReLoc::init()
   {
+    // 阅读主线：init 加载参考地图 -> process 局部 LIO -> enqueueRegistration 冻结快照
+    // -> registrationWorker 求 T_W_S -> commitRegistration 验证并接管最新 ESKF 状态。
 #ifndef SUPERLIO_WITH_TEASER
     throw std::runtime_error("Motion-compensated relocation requires SUPERLIO_WITH_TEASER=ON");
 #endif
@@ -163,6 +165,7 @@ namespace LI2Sup
       throw std::runtime_error("Cannot load relocation reference map: " + map_path);
     const auto loaded_points = reference_cloud_->size();
     const auto reference_voxel = node.declare_parameter<double>("relocation.reference_map_voxel_size_m", s.voxel);
+    // 导入时统一过滤，显示、参考地图查询和后台配准共用该点云，不修改磁盘原始 PCD。
     reference_cloud_ = super_lio_slam::prepareRelocationReference(reference_cloud_, reference_voxel);
     VV3 points;
     points.reserve(reference_cloud_->size());
@@ -173,6 +176,7 @@ namespace LI2Sup
     reference_ivox_.reset(new OctVoxMapType(OctVoxMapType::Options{g_ivox_resolution, g_ivox_capacity}));
     reference_ivox_->insert(points);
     reference_tree_.setInputCloud(reference_cloud_);
+    // 局部地图与先验地图并存：未定位时 Observe() 只查询局部地图，成功后再切换 ivox_。
     local_ivox_ = ivox_;
     data_wrapper_->set_global_map(reference_cloud_);
 
@@ -190,6 +194,7 @@ namespace LI2Sup
 
   bool SuperLIOReLoc::initializeLocal()
   {
+    // 样本数、持续时间和 IMU 波动共同把关；仅样本充足不能证明适合做静止初始化。
     for (const auto &imu : measures_.imu)
     {
       if (!imu.acc.allFinite() || !imu.gyr.allFinite() || imu.gyr.norm() > max_gyro_)
@@ -221,7 +226,7 @@ namespace LI2Sup
     // 均值
     mean_acc /= n;
     mean_gyro /= n;
-    // 方差
+    // 三轴方差之和开方是整体波动尺度，用来排除明显运动；不参与后续配准评分。
     const float acc_std = (acc_square / n - mean_acc.cwiseProduct(mean_acc)).cwiseMax(0).sum();
     const float gyro_std = (gyro_square / n - mean_gyro.cwiseProduct(mean_gyro)).cwiseMax(0).sum();
     if (std::sqrt(acc_std) > max_accel_std_ || std::sqrt(gyro_std) > max_gyro_std_ || mean_acc.norm() < 1e-3)
@@ -229,7 +234,7 @@ namespace LI2Sup
       initialization_imu_.clear();
       return false;
     }
-    // 初始化旋转估计
+    // 将静止比力方向对齐到 S 系 +Z，得到重力对齐姿态；此时仍不知道 S 相对 W 的位置和偏航。
     const M3 rotation = Quat::FromTwoVectors(mean_acc, V3::UnitZ()).toRotationMatrix();
     ESKF::Options options;
     options.gyro_var_ = g_imu_ng;
@@ -297,6 +302,7 @@ namespace LI2Sup
 
   void SuperLIOReLoc::rememberLocalPose()
   {
+    // 该 deque 只为带时间戳的 /initialpose 查找同一时刻局部位姿，不存点云，也不裁剪配准地图。
     ++local_frame_count_;
     prior_pose_history_.push_back({measures_.lidar.end_time, kf_->GetSE3()});
     // This small pose-only history supports stamped /initialpose messages.
@@ -309,6 +315,7 @@ namespace LI2Sup
 
   void SuperLIOReLoc::enqueueRegistration()
   {
+    // 按成功跟踪帧数和传感器时间节流；地图包含体素容器中全部保留点，不是最近 N 帧窗口。
     if (local_frame_count_ < static_cast<std::size_t>(registration_min_frames_) ||
         (last_task_time_ >= 0 && measures_.lidar.end_time - last_task_time_ < registration_interval_))
       return;
@@ -316,6 +323,7 @@ namespace LI2Sup
     task.generation = generation_;
     task.stamp = measures_.lidar.end_time;
     task.frame_count = local_frame_count_;
+    // 冻结同一时刻的地图、扫描和 T_S_IM，防止后台把新位姿误配给旧扫描。
     task.local_from_current = Eigen::Isometry3d(kf_->GetSE3().matrix().cast<double>());
     task.current_cloud.reset(new PointCloudType(*ds_undistort_));
     // The sensor callback owns local_ivox_. Freeze the whole retained S-frame
@@ -334,10 +342,12 @@ namespace LI2Sup
     task.local_map = local_map;
     task.reference = reference_cloud_;
     task.local_gravity = kf_->GetGravity().cast<double>();
+    // 先验给的是某帧 T_W_I，与对应 T_S_I 相消后得到整张局部地图的 T_W_S 提示。
     if (have_prior_)
       task.world_from_local_hint = (prior_pose_ * prior_local_pose_.inverse()).matrix().cast<double>();
     {
       std::lock_guard<std::mutex> lock(registration_mutex_);
+      // 替换尚未运行的旧快照；正在求解的快照保持不变，前端继续累积地图和估计位姿。
       pending_task_ = std::move(task); // Latest pending map wins; running solver is not interrupted.
     }
     last_task_time_ = measures_.lidar.end_time;
@@ -347,6 +357,8 @@ namespace LI2Sup
   // 配准重定位线程
   void SuperLIOReLoc::registrationWorker()
   {
+    // 后台只读不可变快照并产出结果；不直接访问/修改 ESKF 或前端局部地图。
+    // 求解时不持 registration_mutex_，耗时 TEASER/GICP 不应阻塞前端投递和取回结果。
     while (!stopping_)
     {
       RelocationSnapshot task;
@@ -410,6 +422,7 @@ namespace LI2Sup
                   task.local_map->size(), task.current_cloud->size(), r.coarse_inliers, r.pairs,
                   r.coarse_rmse, r.mse, r.overlap, r.current_overlap, decisionText(r.accepted, r.reason).c_str());
       std::lock_guard<std::mutex> lock(registration_mutex_);
+      // 成功结果需留给前端进行最新扫描复查，不能被稍后返回的失败结果覆盖。
       // A newer rejected task must not overwrite a successful older snapshot
       // before the frontend gets a chance to align it to the latest scan.
       if (!stopping_ && (!pending_result_ || !pending_result_->registration.accepted ||
@@ -418,7 +431,7 @@ namespace LI2Sup
     }
   }
 
-  // 提交配准任务
+  // 在传感器处理流程中提交配准结果；后台线程不负责切换滤波器状态。
   bool SuperLIOReLoc::commitRegistration()
   {
     std::optional<RelocationResult> result;
@@ -434,6 +447,8 @@ namespace LI2Sup
     const auto &transform = result->registration.transform;
     if (!validRigidTransform(transform))
       return false;
+    // 快照 M 求得 T_W_S 后，直接乘当前 T_S_IN；无需把滤波器退回 M，也不能重置时间戳。
+    // 再用最新 N 帧扫描验证，避免“旧地图能对齐，但车辆当前已跟丢”仍被接管。
     // A delayed snapshot must also align the latest moving scan before the handoff.
     const Eigen::Matrix4f current = (transform * kf_->GetSE3().matrix().cast<double>()).cast<float>();
     CloudPtr aligned(new PointCloudType);
@@ -467,7 +482,8 @@ namespace LI2Sup
     const SE3 world_from_local(transform.cast<scalar>());
     const double latest_time = kf_->GetTime();
 
-    // 配准成功，就直接改变参考帧，从当前局部坐标系转换到全局坐标系上，同时更新状态和协方差
+    // 一次性完成参考系接管：位姿、速度、重力、协方差以及高频预测缓存一起变换。
+    // 偏置保持机体系定义，时间保留最新扫描时刻；具体雅可比见 ESKF::ChangeReferenceFrame。
     kf_->ChangeReferenceFrame(world_from_local, position_variance_, rotation_variance_);
     sys_init_pose_ = world_from_local * sys_init_pose_;
     last_pose_ = kf_->GetSE3();
@@ -475,10 +491,13 @@ namespace LI2Sup
     points_world_v3_.clear();
     world_pc_->clear();
     ds_world_->clear();
+    // 从下一次 Observe 起改查参考地图；释放前端局部地图、清除旧坐标点缓存。
+    // 已经运行的后台任务仍持有自己的不可变点云快照，结束后自然释放。
     ivox_ = reference_ivox_;
     local_ivox_.reset();
 
     // 设置相关信号
+    // ROS 前后均使用 world 标签：此处清空局部 Path 和黄色预览，随后 Output 发布真实 W 系结果。
     data_wrapper_->commitRelocationFrame(kf_->GetNavState().timestamp);
     publishLocalMapPreview(true);
     stage_ = Stage::World;
@@ -546,6 +565,7 @@ namespace LI2Sup
     prior_pose_ = SE3(rotation, V3(p.x, p.y, p.z));
     prior_local_pose_ = local_pose;
     have_prior_ = true;
+    // 新先验使旧任务过期；后台无需强制中断，但返回结果的 generation 必须与当前一致。
     ++generation_;
     last_task_time_ = -1;
     std::lock_guard<std::mutex> lock(registration_mutex_);
@@ -573,7 +593,7 @@ namespace LI2Sup
       return;
     }
 
-    // 初始化完后开始局部建图
+    // Local 阶段查询局部地图，World 阶段查询参考地图；共用同一套 IMU 传播与点到面更新。
     Propagation_Undistort(); // 去畸变
     DownSample();            // 降采样
     limitScan();             // 扫描限制
@@ -591,7 +611,8 @@ namespace LI2Sup
       {
         SuperLIO::UpdateMap(); // 地图更新
         rememberLocalPose();
-        if (!commitRegistration()) // 如果配准失败
+        // 没有可提交结果也会返回 false；不等同于“后台刚刚配准失败”。先尝试接管，再投递快照。
+        if (!commitRegistration())
         {
           enqueueRegistration(); // 启动新的配准
           setStatus("LOCAL_TRACKING");

@@ -13,7 +13,12 @@ using namespace BASIC;
 
 namespace LI2Sup
 {
+  // LIO 阅读顺序：process -> 初始化状态机 -> stateProcess。
+  // 正常帧依次执行 IMU 传播/去畸变、降采样、点到面迭代更新、地图插入和关键帧发布。
+  // 本文件中的 world 表示前端参考系；回环后端另用 map 保存优化结果，不回写前端 ESKF。
 
+  // 用地图中 4/5 个近邻拟合 n^T p + d = 0，归一化后残差的单位为米。
+  // 所有近邻都须贴近该平面，避免把跨边缘的点簇当作平面观测。
   inline bool calc_plane_coeff(const int N, const std::array<V3, 5> &points, std::array<double, 4> &abcd)
   {
     Eigen::Vector3d normvec;
@@ -65,6 +70,7 @@ namespace LI2Sup
       const std::array<double, 4> &abcd, const V3 &point,
       const float length, scalar &error)
   {
+    // 按点的量程筛选点到面残差；这里 length 是距离，返回值只决定该观测是否参与更新。
     error = abcd[0] * point[0] + abcd[1] * point[1] + abcd[2] * point[2] + abcd[3];
     return length > 81 * error * error;
   }
@@ -130,6 +136,7 @@ namespace LI2Sup
 
   void SuperLIO::process()
   {
+    // 只有 IMU 已覆盖本帧扫描结束时刻才推进状态机，不能用未完成同步的数据更新滤波器。
     if (!data_wrapper_->sync_measure(measures_))
     {
       return;
@@ -139,6 +146,8 @@ namespace LI2Sup
 
   bool SuperLIO::kf_init()
   {
+    // 启动阶段假设静止/低动态：均值陀螺作为零偏，均值加速度用于重力对齐和尺度归一化。
+    // 重力只能约束横滚/俯仰；下面的偏航处理是局部参考系约定，并非绝对航向测量。
     static int imu_cout = 0;
     static V3 mean_gyro = V3::Zero();
     static V3 mean_acce = V3::Zero();
@@ -189,6 +198,7 @@ namespace LI2Sup
 
   bool SuperLIO::map_init()
   {
+    // 尚无地图可供匹配时，使用初始位姿与 LiDAR->IMU 外参把启动点云放入前端参考系。
     frame_num_++;
 
     std::size_t ptsize = measures_.lidar.pc->size();
@@ -222,6 +232,7 @@ namespace LI2Sup
 
   void SuperLIO::stateProcess()
   {
+    // 必须先利用旧地图校正本帧，再把校正后的点插入地图，避免本帧与自身形成匹配。
     frame_num_++;
     if (g_time_eva)
     {
@@ -248,6 +259,7 @@ namespace LI2Sup
 
   void SuperLIO::PublishKeyframe()
   {
+    // 距离、转角或时间任一达到门限即可触发；关键帧频率独立于逐帧 LIO 更新频率。
     if (!keyframe_enabled_ || !scan_undistort_full_ || scan_undistort_full_->empty())
     {
       return;
@@ -288,6 +300,8 @@ namespace LI2Sup
       return;
     }
 
+    // 点云保留在扫描结束时刻的 IMU 系，位姿单独携带 world<-IMU。
+    // 后端才能在 PGO 后重新摆放每帧点云，而不把前端漂移固化进点坐标。
     data_wrapper_->pub_keyframe(cloud, state, next_keyframe_id_++);
     last_keyframe_pose_ = pose;
     last_keyframe_time_ = state.timestamp;
@@ -468,6 +482,8 @@ namespace LI2Sup
   // lidar 点云反向去畸变
   void SuperLIO::Propagation_Undistort()
   {
+    // 每个点按自己的采样时间补偿，最终统一到本帧结束时刻的 IMU 系 I_end。
+    // 保存中间 IMU 状态供插值；扫描末时刻也是后续点到面更新使用的状态时刻。
     propagate_states_.clear();
     propagate_states_.emplace_back(kf_->GetDynamicState());
     kf_->SetObsTime(measures_.lidar.end_time);
@@ -543,6 +559,8 @@ namespace LI2Sup
             }
             V3 t_ei = p_i - T_end_t;
             V3 raw(pt.x, pt.y, pt.z);
+            // p_Iend = R_end^T [R_i (R_IL p_L + t_IL) + p_i - p_end]。
+            // 先经外参进入采样时刻的 IMU 系，再经运动补偿进入统一的帧末 IMU 系。
             V3 eigen_point = R_inv * (R_i * (TLI_R * raw + TLI_t) + t_ei);
             pt_full.x = eigen_point[0];
             pt_full.y = eigen_point[1];
@@ -567,6 +585,7 @@ namespace LI2Sup
 
   void SuperLIO::Observe()
   {
+    // 观测只直接约束 6 维位姿；速度、零偏和重力通过 ESKF 的交叉协方差间接得到修正。
     size_t ptsize = ds_undistort_->size();
 
     static std::vector<float> _lengths;
@@ -604,6 +623,7 @@ namespace LI2Sup
           V3& point_body = points_body_v3_[idx];
           V3 point_world = pose * point_body;
 
+          // 前几次迭代随位姿重新搜索近邻/拟合平面；收敛阶段复用平面减少搜索开销。
           if(!need_converge){
             top_K.reset();
             ivox_->getTopK(point_world, top_K);
@@ -628,9 +648,12 @@ namespace LI2Sup
             V3d nb = R_transpose * normvec;
             V3d point_body_d = point_body.cast<double>();
             V6d J;
+            // r = n^T(Rp+t)+d；右扰动雅可比为 [(p x R^T n)^T, n^T]。
+            // J 在此按列向量保存，累加得到 H^T V^-1 H 与 -H^T V^-1 r。
             J.head<3>() = point_body_d.cross(nb);
             J.tail<3>() = normvec;
       
+            // 1000 是当前实现的固定残差信息权重；线程各自累加，最后归并以避免写冲突。
             local_acc.HTVH += J * 1000 * J.transpose();
             local_acc.HTVr -= J * 1000 * error;
           }
@@ -666,6 +689,7 @@ namespace LI2Sup
 
   void SuperLIO::UpdateMap()
   {
+    // 使用观测更新后的位姿变换降采样点，地图与 ESKF 始终处于同一个当前参考系。
     const size_t ptsize = ds_undistort_->size();
     if (ptsize == 0)
       return;
