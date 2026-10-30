@@ -450,8 +450,8 @@ namespace LI2Sup
 
       odom_imu.header.stamp = outputStamp(data.secs);
       odom_robo.header.stamp = odom_imu.header.stamp;
-      odom_imu.header.frame_id = reference_frame_;
-      odom_robo.header.frame_id = reference_frame_;
+      odom_imu.header.frame_id = "world";
+      odom_robo.header.frame_id = "world";
       pub_imu_odom_->publish(odom_imu);
       pub_robo_odom_->publish(odom_robo);
     }
@@ -767,7 +767,7 @@ namespace LI2Sup
   void ROSWrapper::pub_odom(const NavState &state)
   {
     nav_msgs::msg::Odometry odom;
-    odom.header.frame_id = reference_frame_;
+    odom.header.frame_id = "world";
     odom.child_frame_id = "imu";
 
     odom.header.stamp = outputStamp(state.timestamp);
@@ -794,7 +794,7 @@ namespace LI2Sup
       static auto pub_msg2uav_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
           "/mavros/vision_pose/pose", 10);
       M3 robo_rotation = state.R.R_ * g_odom_robo.R_;
-      msg2uav_.header.frame_id = reference_frame_;
+      msg2uav_.header.frame_id = "world";
       msg2uav_.header.stamp = odom.header.stamp;
       msg2uav_.pose.position.x = robo_position[0];
       msg2uav_.pose.position.y = robo_position[1];
@@ -819,7 +819,6 @@ namespace LI2Sup
     }
 
     const BASIC::SE3 pose = state.GetSE3();
-    const BASIC::SE3 local_pose = world_from_local_ ? world_from_local_->inverse() * pose : pose;
     auto transform_message = [&](const BASIC::SE3 &value, const std::string &parent, const std::string &child)
     {
       geometry_msgs::msg::TransformStamped tf;
@@ -837,18 +836,7 @@ namespace LI2Sup
       tf.transform.rotation.w = q.w();
       return tf;
     };
-    if (relocation_frames_)
-    {
-      std::vector<geometry_msgs::msg::TransformStamped> transforms;
-      transforms.push_back(transform_message(local_pose, "odom_local", "imu"));
-      if (world_from_local_)
-        transforms.push_back(transform_message(*world_from_local_, "world", "odom_local"));
-      tf_broadcaster_->sendTransform(transforms);
-    }
-    else
-    {
-      tf_broadcaster_->sendTransform(transform_message(pose, "world", "imu"));
-    }
+    tf_broadcaster_->sendTransform(transform_message(pose, "world", "imu"));
   }
 
   void ROSWrapper::pub_keyframe(const CloudPtr &cloud,
@@ -876,7 +864,7 @@ namespace LI2Sup
   {
     sensor_msgs::msg::PointCloud2 cloud;
     pcl::toROSMsg(*pc, cloud);
-    cloud.header.frame_id = reference_frame_;
+    cloud.header.frame_id = "world";
     cloud.header.stamp = outputStamp(time);
     pub_cloud_world_->publish(cloud);
   }
@@ -885,7 +873,7 @@ namespace LI2Sup
   {
     sensor_msgs::msg::PointCloud2 cloud;
     pcl::toROSMsg(*pc, cloud);
-    cloud.header.frame_id = reference_frame_;
+    cloud.header.frame_id = "world";
     cloud.header.stamp = outputStamp(time);
     pub_cloud_world_dense_->publish(cloud);
   }
@@ -992,21 +980,14 @@ namespace LI2Sup
             });
   }
 
-  void ROSWrapper::enableRelocationFrames()
+  void ROSWrapper::commitRelocationFrame(double sensor_time)
   {
-    relocation_frames_ = true;
-    reference_frame_ = "odom_local";
-    world_from_local_.reset();
-    path_.poses.clear();
-    path_.header.frame_id = reference_frame_;
-  }
-
-  void ROSWrapper::commitRelocationFrame(const BASIC::SE3 &world_from_local)
-  {
-    world_from_local_ = world_from_local;
-    reference_frame_ = "world";
-    path_.poses.clear();
-    path_.header.frame_id = reference_frame_;
+    // Discard both the provisional trajectory and its allocated storage before
+    // Output() starts the aligned world trajectory at the latest sensor state.
+    path_ = nav_msgs::msg::Path{};
+    path_.header.frame_id = "world";
+    path_.header.stamp = outputStamp(sensor_time);
+    pub_path_->publish(path_);
     last_path_point_ = BASIC::V3(0, 0, -100);
   }
 

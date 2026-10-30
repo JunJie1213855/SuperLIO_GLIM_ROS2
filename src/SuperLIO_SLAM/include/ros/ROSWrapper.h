@@ -8,7 +8,6 @@
 #include <vector>
 #include <execution>
 #include <functional>
-#include <optional>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 #include <pcl/point_types.h>
@@ -87,8 +86,7 @@ namespace LI2Sup
     void set_global_map(const BASIC::CloudPtr &global_map);
 
     void set_initial_data(BASIC::SE3 &init_pose, bool &flg_get_init_guess, bool flg_finish_init = false);
-    void enableRelocationFrames();
-    void commitRelocationFrame(const BASIC::SE3 &world_from_local);
+    void commitRelocationFrame(double sensor_time);
     void setRelocationInitialPoseCallback(
         std::function<void(const geometry_msgs::msg::PoseWithCovarianceStamped &)> callback);
     double sensorTime(const builtin_interfaces::msg::Time &stamp) const;
@@ -128,9 +126,6 @@ namespace LI2Sup
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     BASIC::V3 last_path_point_ = BASIC::V3(0, 0, -100);
-    std::string reference_frame_ = "world";
-    bool relocation_frames_ = false;
-    std::optional<BASIC::SE3> world_from_local_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr relocation_initial_sub_;
 
     /// output.

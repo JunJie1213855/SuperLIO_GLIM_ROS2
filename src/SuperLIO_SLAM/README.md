@@ -187,14 +187,17 @@ build/super_lio_slam/relocation_pcd_check reference_map_local.pcd data/reference
 
 实际 PCD 对照见 [验证记录](../../docs/validation/2026-10-31/relocation_coarse_ab.json)。保存的完整地图与实时小范围地图不等价，离线成功不保证每个在线快照都能定位成功。
 
-成功后使用参考地图跟踪，默认不更新地图。TF 为 `world → odom_local → imu`；
-输出在定位前为 odom_local、成功后为 world。重定位不向回环后端发布关键帧。
+成功后使用参考地图跟踪，默认不更新地图。定位前后输出均为 `world`，TF 始终为 `world → imu`。
+定位前直接显示固定 S 系的局部坐标；成功后变换状态与协方差到参考地图世界系，释放局部地图和旧轨迹，重新生成世界轨迹。重定位不向回环后端发布关键帧。
+
+先验 PCD 加载时按 `relocation.reference_map_voxel_size_m` 统一降采样，YAML 默认 0.3 m（0 关闭），并剔除无效 XYZ。
+显示、参考地图跟踪、质量查询和配准共用过滤后的点云；日志显示原始点数和过滤后点数，磁盘文件不变。
 
 重定位 RViz 默认启用黄色 `LocalMapPreview`（`/lio/relocation/local_map_preview`，Marker）。
 配准前显示局部 LIO 的实际体素地图，成功提交后发布 DELETE 自动清除；迟加入的 RViz 也只收到清除状态。
-预览按初值摆放，无初值时使用原点作为展示位置，不能当作已估计的世界系坐标，也不发布额外 TF。
+预览与局部里程计使用相同的 S 系数值直接显示在 world 中；初始位姿只参与配准先验，不单独移动预览。
 `relocation.visualize_local_map` 控制开关，`relocation.local_map_visualization_interval_s` 默认 0.5 秒，
-`relocation.local_map_visualization_max_points` 默认 50000，仅影响显示。
+`relocation.local_map_visualization_max_points` 当前 YAML 为 200000，仅影响显示。
 
 参数使用 `relocation_config` / `config/relocation/relocation.yaml`，初值为世界系
 `[x,y,z,roll,pitch,yaw]`（m / 度）。`/initialpose` 非零时间戳须属于传感器时间域，

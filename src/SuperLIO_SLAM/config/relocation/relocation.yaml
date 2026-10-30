@@ -6,6 +6,8 @@ relocation_node:
     lio.relocation.init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Empty means sensor YAML's lio.map.save_map_dir + lio.map.map_name.
     relocation.map_path: ""
+    # Applied once on PCD load, shared by visualization/tracking/registration; 0 disables.
+    relocation.reference_map_voxel_size_m: 0.3
     relocation.debug_snapshot_dir: ""  # optional: latest actual source.pcd + snapshot.json
     # Yellow display-only local voxel map; removed on successful handoff.
     relocation.visualize_local_map: true

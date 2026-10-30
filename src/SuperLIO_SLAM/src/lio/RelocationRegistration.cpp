@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 
@@ -35,6 +36,27 @@ namespace super_lio_slam
       }
       return output;
     }
+  }
+
+  RegistrationCloud::Ptr prepareRelocationReference(const RegistrationCloud::ConstPtr &input,
+                                                     double voxel_size)
+  {
+    if (!std::isfinite(voxel_size) || voxel_size < 0)
+      throw std::invalid_argument("relocation.reference_map_voxel_size_m must be finite and nonnegative");
+    RegistrationCloud::Ptr finite(new RegistrationCloud);
+    if (input)
+    {
+      finite->header = input->header;
+      finite->sensor_origin_ = input->sensor_origin_;
+      finite->sensor_orientation_ = input->sensor_orientation_;
+      finite->reserve(input->size());
+      // Do not trust is_dense in imported PCD files.
+      for (const auto &point : *input)
+        if (point.getVector3fMap().allFinite())
+          finite->push_back(point);
+    }
+    finite->is_dense = true;
+    return sample(finite, voxel_size, 0);
   }
 
   RelocationResult registerRelocation(const RelocationSnapshot &task,

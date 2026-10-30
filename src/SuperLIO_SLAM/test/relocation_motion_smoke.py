@@ -15,7 +15,7 @@ import time
 import numpy as np
 import rclpy
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as RosPath
 from sensor_msgs.msg import Imu, PointCloud2, PointField
 from std_msgs.msg import String
 from tf2_msgs.msg import TFMessage
@@ -93,10 +93,11 @@ def main():
     log=log_path.open('w')
     rclpy.init()
     node=rclpy.create_node('relocation_motion_smoke')
-    poses=[]; states=[]; transforms=[]; previews=[]
+    poses=[]; states=[]; transforms=[]; previews=[]; paths=[]
     preview_qos=QoSProfile(depth=10,durability=DurabilityPolicy.TRANSIENT_LOCAL)
     node.create_subscription(Marker,'/lio/relocation/local_map_preview',previews.append,preview_qos)
     node.create_subscription(Odometry,'/lio/odom',poses.append,1000)
+    node.create_subscription(RosPath,'/lio/path',paths.append,1000)
     node.create_subscription(String,'/lio/relocation/status',lambda msg:states.append(msg.data),
         QoSProfile(depth=20,durability=DurabilityPolicy.TRANSIENT_LOCAL))
     node.create_subscription(TFMessage,'/tf',lambda msg:transforms.extend(msg.transforms),1000)
@@ -148,12 +149,15 @@ def main():
         expected_end=base+args.frames*.1
         while time.monotonic()<deadline:
             rclpy.spin_once(node,timeout_sec=.05)
-            if poses and poses[-1].header.frame_id=='world' and poses[-1].header.stamp.sec+poses[-1].header.stamp.nanosec*1e-9>expected_end-.15:
+            if poses and 'WORLD_MAP_TRACKING' in states and poses[-1].header.stamp.sec+poses[-1].header.stamp.nanosec*1e-9>expected_end-.15:
                 break
         assert 'LOCAL_TRACKING' in states and 'WORLD_MAP_TRACKING' in states,log_tail()
         additions=[marker for marker in previews if marker.action==Marker.ADD]
         assert additions and all(0<len(marker.points)<=200 for marker in additions),'Missing/bounded local-map visualization failed'
         assert all(marker.header.frame_id=='world' for marker in previews),'Preview must be visible in the RViz canvas'
+        # This scene starts near x=-5 in S; the supplied W<-S hint moves its
+        # minimum x above -3.5. Only registration may apply that hint.
+        assert min(p.x for p in additions[0].points)<-3.5,'Prior moved preview away from provisional odometry'
         assert previews[-1].action==Marker.DELETE,'Successful handoff left the local map visible'
         late_previews=[]
         late_sub=node.create_subscription(Marker,'/lio/relocation/local_map_preview',late_previews.append,preview_qos)
@@ -162,8 +166,15 @@ def main():
             rclpy.spin_once(node,timeout_sec=.05)
         assert late_previews and late_previews[-1].action==Marker.DELETE,'Late subscriber received stale local map'
         node.destroy_subscription(late_sub)
-        local_poses=[pose for pose in poses if pose.header.frame_id=='odom_local']
-        world_poses=[pose for pose in poses if pose.header.frame_id=='world']
+        def seconds(stamped):
+            return stamped.header.stamp.sec+stamped.header.stamp.nanosec*1e-9
+        clears=[path for path in paths if not path.poses]
+        assert len(clears)==1,'Missing explicit provisional-path clear at handoff'
+        handoff=seconds(clears[0])
+        assert paths[-1].poses and seconds(paths[-1].poses[0])>=handoff,'World path retained provisional poses'
+        assert all(msg.header.frame_id=='world' for msg in poses+paths),'Outputs must use world throughout'
+        local_poses=[pose for pose in poses if seconds(pose)<handoff]
+        world_poses=[pose for pose in poses if seconds(pose)>=handoff]
         assert len(local_poses)>=8 and len(world_poses)>=5,'Missing local/world scan tracking'
         times=[pose.header.stamp.sec+pose.header.stamp.nanosec*1e-9 for pose in poses]
         assert all(b>a for a,b in zip(times,times[1:])),'Scan time went backwards or was reset'
@@ -177,8 +188,7 @@ def main():
             errors.append(np.linalg.norm(np.array([p.x,p.y,p.z])-expected))
         assert max(errors)<.35,f'World-frame motion error {max(errors):.4f} m'
         imu_transforms=[tf for tf in transforms if tf.child_frame_id=='imu']
-        assert imu_transforms and all(tf.header.frame_id=='odom_local' for tf in imu_transforms),'Double TF parent for imu'
-        assert any(tf.header.frame_id=='world' and tf.child_frame_id=='odom_local' for tf in transforms),'Missing W<-S TF'
+        assert imu_transforms and all(tf.header.frame_id=='world' and tf.child_frame_id=='imu' for tf in transforms),'Expected only world -> imu TF'
         text=log_tail()
         match=re.search(r'Relocation committed: snapshot=([0-9.]+) latest=([0-9.]+) preserved_time=([0-9.]+)',text)
         assert match,'No atomic handoff diagnostic'

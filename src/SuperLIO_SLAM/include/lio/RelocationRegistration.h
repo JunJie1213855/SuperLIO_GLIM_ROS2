@@ -6,6 +6,10 @@
 
 namespace super_lio_slam
 {
+  // Prepare the shared reference used by display, tracking and registration.
+  // Keep coordinates in W; remove invalid XYZ, then voxel-filter (0 disables).
+  RegistrationCloud::Ptr prepareRelocationReference(const RegistrationCloud::ConstPtr &input,
+                                                     double voxel_size);
 
   // Immutable cumulative LIO map in the fixed session frame S. The scan and
   // S<-I_M pose are captured at the same sensor time, independently of map size.

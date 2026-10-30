@@ -4,12 +4,34 @@
 #include <iostream>
 #include <random>
 #include <stdexcept>
+#include <limits>
 using namespace BASIC;
 using namespace LI2Sup;
 using namespace super_lio_slam;
 void require(bool ok,const char* text) { if(!ok) throw std::runtime_error(text); }
 int main() {
   try {
+    RegistrationCloud::Ptr imported(new RegistrationCloud);
+    for (const auto &v : {Eigen::Vector3f(.01f,.02f,.03f), Eigen::Vector3f(.11f,.12f,.13f),
+                          Eigen::Vector3f(1.01f,.02f,.03f)}) {
+      pcl::PointXYZI p; p.getVector3fMap()=v; p.intensity=4; imported->push_back(p);
+    }
+    auto bad=imported->front(); bad.x=std::numeric_limits<float>::quiet_NaN(); imported->push_back(bad);
+    imported->is_dense=true; // Deliberately incorrect PCD metadata.
+    const auto filtered=prepareRelocationReference(imported,.3);
+    require(filtered->size()==2,"reference map was not voxel-filtered on import");
+    require((filtered->front().getVector3fMap()-Eigen::Vector3f(.06f,.07f,.08f)).norm()<1e-6 &&
+            (filtered->back().getVector3fMap()-Eigen::Vector3f(1.01f,.02f,.03f)).norm()<1e-6,
+            "reference voxel centroids changed world coordinates");
+    for (const auto &p : *filtered)
+      require(p.getVector3fMap().allFinite() && p.intensity==4,"reference filter lost valid XYZ/intensity");
+    require(prepareRelocationReference(imported,0)->size()==3,"zero reference voxel must only remove invalid XYZ");
+    require(imported->size()==4,"reference filter mutated imported cloud");
+    for (double voxel : {-1.,std::numeric_limits<double>::quiet_NaN()}) {
+      bool rejected=false;
+      try { prepareRelocationReference(imported,voxel); } catch(const std::invalid_argument&) {rejected=true;}
+      require(rejected,"invalid reference voxel accepted");
+    }
     ESKF original, rebased;
     ESKF::Options options;
     V3 bg(.01f,-.02f,.03f),ba(.02f,.03f,-.01f),gravity(0,0,-9.81f);
@@ -84,7 +106,7 @@ int main() {
     truth.linear()=Eigen::AngleAxisd(.35,Eigen::Vector3d::UnitZ()).toRotationMatrix(); truth.translation()=Eigen::Vector3d(3,-2,0);
     RegistrationCloud::Ptr reference(new RegistrationCloud);
     pcl::transformPointCloud(*local,*reference,truth.matrix().cast<float>().eval());
-    task.reference=reference; task.world_from_local_hint=truth.matrix();
+    task.reference=prepareRelocationReference(reference,.3); task.world_from_local_hint=truth.matrix();
     RegistrationSettings settings; settings.voxel=.3; settings.normal_radius=.8; settings.feature_radius=1.6;
     const auto result=registerRelocation(task,settings,80,10);
     std::cout<<"registration "<<result.registration.reason<<" mse="<<result.registration.mse<<std::endl;
@@ -108,7 +130,16 @@ int main() {
     global_settings.clique_seconds=2.;
     global_settings.threads=2;
     global_settings.rotation_cost_threshold=1e-4;
+    // Match relocation.yaml's global coarse gates, rather than the loop
+    // backend's 30% correspondence gate inherited from RegistrationSettings.
+    global_settings.coarse_min_inliers=3;
+    global_settings.coarse_min_ratio=.01;
+    global_settings.coarse_max_rmse=.4;
     const auto global_result=registerRelocation(task,global_settings,80,10);
+    std::cout<<"global registration "<<global_result.registration.reason
+             <<" coarse="<<global_result.registration.coarse_inliers
+             <<" mse="<<global_result.registration.mse
+             <<" transform_error="<<(global_result.registration.transform-truth.matrix()).norm()<<std::endl;
     require(global_result.registration.accepted && (global_result.registration.transform-truth.matrix()).norm()<.1,
             "global matcher lost W<-S transform or failed snapshot scan quality");
     task.local_gravity=Eigen::Vector3d(9.81,0,0);

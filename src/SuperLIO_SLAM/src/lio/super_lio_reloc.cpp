@@ -50,7 +50,6 @@ namespace LI2Sup
 #endif
     SuperLIO::init();
     keyframe_enabled_ = false; // Never mix local-S keyframes into the world-frame loop graph.
-    data_wrapper_->enableRelocationFrames();
     auto &node = *data_wrapper_;
     debug_snapshot_dir_ = node.declare_parameter<std::string>("relocation.debug_snapshot_dir", "");
     auto positive = [&](const char *key, double value)
@@ -162,15 +161,13 @@ namespace LI2Sup
     reference_cloud_.reset(new PointCloudType);
     if (pcl::io::loadPCDFile<PointType>(map_path, *reference_cloud_) < 0)
       throw std::runtime_error("Cannot load relocation reference map: " + map_path);
-    CloudPtr finite(new PointCloudType);
+    const auto loaded_points = reference_cloud_->size();
+    const auto reference_voxel = node.declare_parameter<double>("relocation.reference_map_voxel_size_m", s.voxel);
+    reference_cloud_ = super_lio_slam::prepareRelocationReference(reference_cloud_, reference_voxel);
     VV3 points;
+    points.reserve(reference_cloud_->size());
     for (const auto &p : *reference_cloud_)
-      if (p.getVector3fMap().allFinite())
-      {
-        finite->push_back(p);
-        points.push_back(p.getVector3fMap());
-      }
-    reference_cloud_ = finite;
+      points.push_back(p.getVector3fMap());
     if (points.size() < static_cast<std::size_t>(s.min_points))
       throw std::runtime_error("Relocation reference map is empty/sparse");
     reference_ivox_.reset(new OctVoxMapType(OctVoxMapType::Options{g_ivox_resolution, g_ivox_capacity}));
@@ -184,7 +181,8 @@ namespace LI2Sup
                                                     { receivePrior(msg); });
     setStatus("WAITING_FOR_STATIONARY_IMU");
     registration_thread_ = std::thread(&SuperLIOReLoc::registrationWorker, this);
-    RCLCPP_INFO(node.get_logger(), "Relocation reference loaded: %zu points, %s", points.size(), map_path.c_str());
+    RCLCPP_INFO(node.get_logger(), "Relocation reference loaded: %zu -> %zu points, voxel=%.3f m, %s",
+                loaded_points, points.size(), reference_voxel, map_path.c_str());
     RCLCPP_INFO(node.get_logger(), "Relocation coarse profile: matcher=%s pairs<=%d clique=%s budget=%.2f s voxel=%.2f normal=%.2f feature=%.2f",
                 s.feature_matching.c_str(), s.max_pairs, clique_mode.c_str(), s.clique_seconds,
                 s.voxel, s.normal_radius, s.feature_radius);
@@ -481,7 +479,7 @@ namespace LI2Sup
     local_ivox_.reset();
 
     // 设置相关信号
-    data_wrapper_->commitRelocationFrame(world_from_local);
+    data_wrapper_->commitRelocationFrame(kf_->GetNavState().timestamp);
     publishLocalMapPreview(true);
     stage_ = Stage::World;
     ++generation_;
@@ -630,9 +628,8 @@ namespace LI2Sup
           (last_local_map_preview_time_ >= 0 &&
            measures_.lidar.end_time - last_local_map_preview_time_ < local_map_preview_interval_))
         return;
-      // Display-only placement in RViz's world canvas. Without a prior this is
-      // an arbitrary identity placement, NOT an estimated world<-local TF.
-      const SE3 placement = have_prior_ ? prior_pose_ * prior_local_pose_.inverse() : SE3();
+      // Match the provisional odometry/scan coordinates shown directly in
+      // world. A registration prior must not move only the preview map.
       std::vector<float> xyz;
       local_ivox_->getMap(xyz);
       const std::size_t count = xyz.size() / 3;
@@ -641,9 +638,8 @@ namespace LI2Sup
       for (std::size_t i = 0; i < displayed; ++i)
       {
         const auto index = (i * count / displayed) * 3;
-        const V3 p = placement * V3(xyz[index], xyz[index + 1], xyz[index + 2]);
         geometry_msgs::msg::Point point;
-        point.x = p.x(); point.y = p.y(); point.z = p.z();
+        point.x = xyz[index]; point.y = xyz[index + 1]; point.z = xyz[index + 2];
         marker.points.push_back(point);
       }
       marker.scale.x = marker.scale.y = 0.08;
