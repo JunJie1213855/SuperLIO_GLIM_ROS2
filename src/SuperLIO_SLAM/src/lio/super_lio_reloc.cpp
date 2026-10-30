@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <stdexcept>
 #include <pcl/common/transforms.h>
@@ -50,6 +52,7 @@ namespace LI2Sup
     keyframe_enabled_ = false; // Never mix local-S keyframes into the world-frame loop graph.
     data_wrapper_->enableRelocationFrames();
     auto &node = *data_wrapper_;
+    debug_snapshot_dir_ = node.declare_parameter<std::string>("relocation.debug_snapshot_dir", "");
     auto positive = [&](const char *key, double value)
     {
       const auto result = node.declare_parameter<double>(key, value);
@@ -64,21 +67,16 @@ namespace LI2Sup
         throw std::invalid_argument(std::string(key) + " is outside its supported range");
       return result;
     };
-    SubmapLimits limits;
-    limits.max_frames = integer("relocation.window_max_frames", 10, 2, 100);
-    limits.max_duration = positive("relocation.window_max_duration_s", 3.0);
-    limits.max_travel = positive("relocation.window_max_travel_m", 5.0);
-    window_ = SubmapWindow(limits);
-    min_frames_ = integer("relocation.window_min_frames", 5, 2, limits.max_frames);
+    registration_min_frames_ = integer("relocation.registration_min_frames", 5, 1, 100000);
+    for (const auto &[name, value] : node.get_node_parameters_interface()->get_parameter_overrides())
+      if (name.rfind("relocation.window_", 0) == 0 || name.rfind("relocation.keyframe_", 0) == 0)
+        RCLCPP_WARN(node.get_logger(), "%s is obsolete and ignored: relocation registers the cumulative S-frame LIO map", name.c_str());
     imu_samples_ = integer("relocation.imu_init_samples", 50, 20, 10000);
     init_duration_ = positive("relocation.imu_init_duration_s", .3);
     max_gyro_ = positive("relocation.imu_max_gyro_rad_s", .15);
     max_gyro_std_ = positive("relocation.imu_max_gyro_std", .02);
     max_accel_std_ = positive("relocation.imu_max_accel_std", .15);
     min_plane_points_ = integer("relocation.local_min_plane_points", 30, 6, 20000);
-    keyframe_distance_ = positive("relocation.keyframe_distance_m", .2);
-    keyframe_angle_ = positive("relocation.keyframe_angle_deg", 5.0);
-    keyframe_interval_ = positive("relocation.keyframe_max_interval_s", .3);
     registration_interval_ = positive("relocation.registration_interval_s", 1.0);
     crop_radius_ = node.declare_parameter<double>("relocation.map_crop_radius_m", 80.0);
     if (!std::isfinite(crop_radius_) || crop_radius_ < 0)
@@ -98,25 +96,38 @@ namespace LI2Sup
     prior_pose_ = SE3(R, V3(g_init_px, g_init_py, g_init_pz));
 
     auto &s = settings_;
-    s.voxel = positive("registration_voxel_size_m", .5);
+    s.voxel = positive("registration_voxel_size_m", .3);
     s.min_points = integer("registration_min_points", 100, 30, 100000);
-    s.max_source = integer("registration_max_source_points", 10000, 100, 100000);
-    s.max_target = integer("registration_max_target_points", 50000, 100, 200000);
-    s.normal_radius = positive("fpfh_normal_radius_m", 1.0);
-    s.feature_radius = positive("fpfh_feature_radius_m", 2.5);
+    // 0 keeps every voxel-filtered point. Positive limits sample the complete
+    // spatial map, never truncate its history to a recent scan window.
+    s.max_source = integer("registration_max_source_points", 0, 0, 10000000);
+    s.max_target = integer("registration_max_target_points", 50000, 0, 10000000);
+    s.normal_radius = positive("fpfh_normal_radius_m", .9);
+    s.feature_radius = positive("fpfh_feature_radius_m", 1.5);
+    s.feature_matching = node.declare_parameter<std::string>("fpfh_matching_mode", "nearest");
+    if (s.feature_matching != "nearest" && s.feature_matching != "mutual_ratio")
+      throw std::invalid_argument("fpfh_matching_mode must be nearest or mutual_ratio");
     s.feature_ratio = positive("fpfh_distance_ratio_threshold", .9);
     s.hint_radius = positive("fpfh_pose_hint_radius_m", 3.0);
     s.min_pairs = integer("correspondence_min_unique", 6, 3, 500);
-    s.max_pairs = integer("correspondence_max_unique", 200, 3, 500);
+    s.max_pairs = integer("correspondence_max_unique", 2000, 3, 10000);
     s.min_baseline = positive("correspondence_min_baseline_m", 2.0);
     s.noise_bound = positive("teaser_noise_bound_m", .3);
     s.rotation_iterations = integer("teaser_rotation_max_iterations", 100, 1, 1000);
-    s.clique_seconds = positive("teaser_max_clique_time_limit_s", .05);
-    s.threads = integer("teaser_max_clique_num_threads", 2, 1, 16);
+    s.clique_seconds = positive("teaser_max_clique_time_limit_s", 30.0);
+    const auto clique_mode = node.declare_parameter<std::string>("teaser_inlier_selection", "pmc_exact");
+    if (clique_mode != "pmc_exact" && clique_mode != "pmc_heuristic")
+      throw std::invalid_argument("teaser_inlier_selection must be pmc_exact or pmc_heuristic");
+    s.exact_clique = clique_mode == "pmc_exact";
+    s.rotation_gnc_factor = positive("teaser_rotation_gnc_factor", 1.4);
+    s.rotation_cost_threshold = positive("teaser_rotation_cost_threshold", 1e-4);
+    if (s.rotation_gnc_factor <= 1)
+      throw std::invalid_argument("teaser_rotation_gnc_factor must be greater than one");
+    s.threads = integer("teaser_max_clique_num_threads", 4, 1, 16);
     s.coarse_radius = positive("coarse_residual_threshold_m", .6);
     s.coarse_min_inliers = integer("coarse_min_inliers", 6, 3, 500);
-    s.coarse_min_ratio = positive("coarse_min_inlier_ratio", .3);
-    s.coarse_max_rmse = positive("coarse_max_inlier_rmse_m", .3);
+    s.coarse_min_ratio = positive("coarse_min_inlier_ratio", .01);
+    s.coarse_max_rmse = positive("coarse_max_inlier_rmse_m", .4);
     s.max_iterations = integer("gicp_max_iterations", 40, 1, 200);
     s.covariance_neighbors = integer("gicp_correspondence_randomness", 20, 4, 100);
     s.correspondence_distance = positive("gicp_max_correspondence_distance_m", 2.0);
@@ -144,6 +155,10 @@ namespace LI2Sup
     std::string map_path = node.declare_parameter<std::string>("relocation.map_path", "");
     if (map_path.empty())
       map_path = g_save_map_dir + "/" + g_map_name;
+    if (!debug_snapshot_dir_.empty() &&
+        std::filesystem::weakly_canonical(std::filesystem::path(debug_snapshot_dir_) / "source.pcd") ==
+            std::filesystem::weakly_canonical(map_path))
+      throw std::invalid_argument("Debug snapshot source.pcd must not overwrite the reference map");
     reference_cloud_.reset(new PointCloudType);
     if (pcl::io::loadPCDFile<PointType>(map_path, *reference_cloud_) < 0)
       throw std::runtime_error("Cannot load relocation reference map: " + map_path);
@@ -170,6 +185,9 @@ namespace LI2Sup
     setStatus("WAITING_FOR_STATIONARY_IMU");
     registration_thread_ = std::thread(&SuperLIOReLoc::registrationWorker, this);
     RCLCPP_INFO(node.get_logger(), "Relocation reference loaded: %zu points, %s", points.size(), map_path.c_str());
+    RCLCPP_INFO(node.get_logger(), "Relocation coarse profile: matcher=%s pairs<=%d clique=%s budget=%.2f s voxel=%.2f normal=%.2f feature=%.2f",
+                s.feature_matching.c_str(), s.max_pairs, clique_mode.c_str(), s.clique_seconds,
+                s.voxel, s.normal_radius, s.feature_radius);
   }
 
   bool SuperLIOReLoc::initializeLocal()
@@ -262,7 +280,7 @@ namespace LI2Sup
     // 状态变化
     stage_ = Stage::Local;
     tracking_good_ = true;
-    rememberFrame();
+    rememberLocalPose();
     initialization_imu_.clear();
     setStatus("LOCAL_TRACKING");
     Output();
@@ -279,38 +297,50 @@ namespace LI2Sup
     ds_undistort_ = capped;
   }
 
-  void SuperLIOReLoc::rememberFrame()
+  void SuperLIOReLoc::rememberLocalPose()
   {
-    const auto pose = kf_->GetSE3();
-    if (!window_.entries().empty())
-    {
-      const auto &last = window_.entries().back();
-      const auto delta = last.odom_pose.inverse() * Eigen::Isometry3d(pose.matrix().cast<double>());
-      if (delta.translation().norm() < keyframe_distance_ &&
-          Eigen::AngleAxisd(delta.rotation()).angle() * 180 / M_PI < keyframe_angle_ &&
-          measures_.lidar.end_time - last.stamp < keyframe_interval_)
-        return;
-    }
-    CloudPtr cloud(new PointCloudType(*scan_undistort_full_));
-    window_.append({next_frame_++, measures_.lidar.end_time, Eigen::Isometry3d(pose.matrix().cast<double>()), cloud});
+    ++local_frame_count_;
+    prior_pose_history_.push_back({measures_.lidar.end_time, kf_->GetSE3()});
+    // This small pose-only history supports stamped /initialpose messages.
+    // It contains no clouds and has no effect on registration map coverage.
+    while (prior_pose_history_.size() > 1 &&
+           (prior_pose_history_.back().stamp - prior_pose_history_.front().stamp > 5.0 ||
+            prior_pose_history_.size() > 2000))
+      prior_pose_history_.pop_front();
   }
 
   void SuperLIOReLoc::enqueueRegistration()
   {
-    if (window_.entries().size() < static_cast<std::size_t>(min_frames_) ||
+    if (local_frame_count_ < static_cast<std::size_t>(registration_min_frames_) ||
         (last_task_time_ >= 0 && measures_.lidar.end_time - last_task_time_ < registration_interval_))
       return;
     RelocationSnapshot task;
     task.generation = generation_;
     task.stamp = measures_.lidar.end_time;
-    task.window = window_;
+    task.frame_count = local_frame_count_;
+    task.local_from_current = Eigen::Isometry3d(kf_->GetSE3().matrix().cast<double>());
+    task.current_cloud.reset(new PointCloudType(*ds_undistort_));
+    // The sensor callback owns local_ivox_. Freeze the whole retained S-frame
+    // map here; the registration worker never reads a map being updated by LIO.
+    std::vector<float> xyz;
+    local_ivox_->getMap(xyz);
+    CloudPtr local_map(new PointCloudType);
+    local_map->reserve(xyz.size() / 3);
+    for (std::size_t i = 0; i + 2 < xyz.size(); i += 3)
+    {
+      PointType point;
+      point.x = xyz[i]; point.y = xyz[i + 1]; point.z = xyz[i + 2];
+      point.intensity = 0; // OctVoxMap stores geometry only; FPFH/GICP use XYZ.
+      local_map->push_back(point);
+    }
+    task.local_map = local_map;
     task.reference = reference_cloud_;
     task.local_gravity = kf_->GetGravity().cast<double>();
     if (have_prior_)
       task.world_from_local_hint = (prior_pose_ * prior_local_pose_.inverse()).matrix().cast<double>();
     {
       std::lock_guard<std::mutex> lock(registration_mutex_);
-      pending_task_ = std::move(task); // Latest pending window wins; running solver is not interrupted.
+      pending_task_ = std::move(task); // Latest pending map wins; running solver is not interrupted.
     }
     last_task_time_ = measures_.lidar.end_time;
     registration_cv_.notify_one();
@@ -333,6 +363,35 @@ namespace LI2Sup
         pending_task_.reset();
       }
       RelocationResult result;
+      if (!debug_snapshot_dir_.empty())
+      {
+        // Optional, bounded on-disk reproduction of the ACTUAL online input.
+        // One worker overwrites the latest pair; no per-frame bag recording.
+        try
+        {
+          const auto directory = std::filesystem::path(debug_snapshot_dir_);
+          std::filesystem::create_directories(directory);
+          const auto temporary = directory / ".source.tmp.pcd";
+          if (pcl::io::savePCDFileBinary(temporary.string(), *task.local_map) < 0)
+            throw std::runtime_error("Cannot write source.pcd");
+          std::filesystem::rename(temporary, directory / "source.pcd");
+          std::ofstream metadata(directory / ".snapshot.tmp.json");
+          metadata.exceptions(std::ios::failbit | std::ios::badbit);
+          metadata << std::setprecision(17) << "{\"stamp\":" << task.stamp
+                   << ",\"frames\":" << task.frame_count << ",\"map_points\":" << task.local_map->size()
+                   << ",\"local_from_current\":[";
+          for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 4; ++col)
+              metadata << (row || col ? "," : "") << task.local_from_current.matrix()(row, col);
+          metadata << "]}\n";
+          metadata.close();
+          std::filesystem::rename(directory / ".snapshot.tmp.json", directory / "snapshot.json");
+        }
+        catch (const std::exception &error)
+        {
+          RCLCPP_WARN(data_wrapper_->get_logger(), "Cannot export relocation debug snapshot: %s", error.what());
+        }
+      }
       try
       {
         // 重定位配准
@@ -346,13 +405,17 @@ namespace LI2Sup
       }
       const auto &r = result.registration;
       RCLCPP_INFO(data_wrapper_->get_logger(),
-                  "Relocation registration %s: generation=%lu stamp=%.6f coarse=%zu/%zu rmse=%.4f "
+                  "Relocation registration %s: generation=%lu stamp=%.6f frames=%zu map_points=%zu scan_points=%zu coarse=%zu/%zu rmse=%.4f "
                   "mse=%.4f overlap=%.3f current_overlap=%.3f stage=%s",
                   decisionText(r.accepted, r.accepted ? "accepted" : "rejected").c_str(),
-                  static_cast<unsigned long>(result.generation), result.stamp, r.coarse_inliers, r.pairs,
+                  static_cast<unsigned long>(result.generation), result.stamp, task.frame_count,
+                  task.local_map->size(), task.current_cloud->size(), r.coarse_inliers, r.pairs,
                   r.coarse_rmse, r.mse, r.overlap, r.current_overlap, decisionText(r.accepted, r.reason).c_str());
       std::lock_guard<std::mutex> lock(registration_mutex_);
-      if (!stopping_)
+      // A newer rejected task must not overwrite a successful older snapshot
+      // before the frontend gets a chance to align it to the latest scan.
+      if (!stopping_ && (!pending_result_ || !pending_result_->registration.accepted ||
+                         result.registration.accepted || pending_result_->generation != result.generation))
         pending_result_ = std::move(result);
     }
   }
@@ -424,7 +487,7 @@ namespace LI2Sup
     ++generation_;
     stopping_ = true;
     registration_cv_.notify_all();
-    window_ = SubmapWindow();
+    prior_pose_history_.clear();
     {
       std::lock_guard<std::mutex> lock(registration_mutex_);
       pending_task_.reset();
@@ -464,20 +527,20 @@ namespace LI2Sup
     if (stage_ == Stage::Local && (msg.header.stamp.sec != 0 || msg.header.stamp.nanosec != 0))
     {
       const double stamp = data_wrapper_->sensorTime(msg.header.stamp);
-      auto best = window_.entries().end();
+      auto best = prior_pose_history_.end();
       double gap = .25;
-      for (auto it = window_.entries().begin(); it != window_.entries().end(); ++it)
+      for (auto it = prior_pose_history_.begin(); it != prior_pose_history_.end(); ++it)
         if (std::abs(it->stamp - stamp) <= gap)
         {
           best = it;
           gap = std::abs(it->stamp - stamp);
         }
-      if (best == window_.entries().end())
+      if (best == prior_pose_history_.end())
       {
-        RCLCPP_WARN(data_wrapper_->get_logger(), "Initial pose timestamp has no matching local keyframe (tolerance 0.25 s)");
+        RCLCPP_WARN(data_wrapper_->get_logger(), "Initial pose timestamp has no matching local pose (tolerance 0.25 s)");
         return;
       }
-      local_pose = SE3(best->odom_pose.matrix().cast<scalar>());
+      local_pose = best->pose;
     }
     // 四元数归一化
     rotation.normalize();
@@ -529,7 +592,7 @@ namespace LI2Sup
       if (tracking_good_)
       {
         SuperLIO::UpdateMap(); // 地图更新
-        rememberFrame();
+        rememberLocalPose();
         if (!commitRegistration()) // 如果配准失败
         {
           enqueueRegistration(); // 启动新的配准

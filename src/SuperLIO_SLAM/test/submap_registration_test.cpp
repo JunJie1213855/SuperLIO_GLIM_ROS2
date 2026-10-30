@@ -119,6 +119,27 @@ int main() {
     require(fine.accepted,"GICP known transform rejected");
     require((fine.transform-truth.matrix()).norm()<.12,"incorrect full registration transform");
     require(!coarseRegister(one(0),one(0),settings).accepted,"sparse coarse input accepted");
+    auto global_settings=settings;
+    global_settings.feature_matching="nearest";
+    global_settings.max_pairs=1000;
+    global_settings.exact_clique=true;
+    global_settings.clique_seconds=2.;
+    global_settings.rotation_cost_threshold=1e-4;
+    global_settings.threads=2;
+    global_settings.coarse_min_inliers=3;
+    global_settings.coarse_min_ratio=.01;
+    global_settings.coarse_max_rmse=.4;
+    const auto global_coarse=coarseRegister(src,dst,global_settings);
+    std::cout<<"global coarse "<<global_coarse.reason<<" pairs="<<global_coarse.pairs
+             <<" inliers="<<global_coarse.coarse_inliers<<" rmse="<<global_coarse.coarse_rmse
+             <<" transform_error="<<(global_coarse.transform-truth.matrix()).norm()<<std::endl;
+    require(global_coarse.pairs>200 && global_coarse.pairs<=1000,
+            "global matching still uses the 200-pair online cap");
+    require(global_coarse.accepted,
+            "global NN/exact-clique coarse registration failed");
+    const auto global_fine=refineRegister(src,dst,source,global_settings,global_coarse);
+    require(global_fine.accepted && (global_fine.transform-truth.matrix()).norm()<.12,
+            "global coarse result cannot pass GICP/quality gates");
 #endif
     settings.min_overlap=1.01;
     require(!refineRegister(src,dst,source,settings,initial).accepted,"quality gate failed to reject");

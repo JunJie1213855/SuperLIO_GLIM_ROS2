@@ -37,19 +37,6 @@ namespace super_lio_slam
     }
   }
 
-  RegistrationCloud::Ptr fixedFrameCloud(const SubmapWindow &window, double voxel,
-                                         std::size_t max_points)
-  {
-    RegistrationCloud::Ptr merged(new RegistrationCloud);
-    for (const auto &entry : window.entries())
-    {
-      RegistrationCloud transformed;
-      pcl::transformPointCloud(*entry.cloud, transformed, entry.odom_pose.matrix().cast<float>().eval());
-      *merged += transformed;
-    }
-    return sample(merged, voxel, max_points);
-  }
-
   RelocationResult registerRelocation(const RelocationSnapshot &task,
                                       const RegistrationSettings &settings,
                                       double crop_radius, double max_gravity_angle_deg)
@@ -57,21 +44,25 @@ namespace super_lio_slam
     RelocationResult output;
     output.generation = task.generation;
     output.stamp = task.stamp;
-    if (task.window.entries().empty() || !task.reference || task.reference->empty())
+    if (!task.local_map || task.local_map->empty() ||
+        !task.current_cloud || task.current_cloud->empty() ||
+        !task.local_from_current.matrix().allFinite() ||
+        !task.reference || task.reference->empty())
     {
       output.registration.reason = "empty_relocation_snapshot";
       return output;
     }
-    const auto source = fixedFrameCloud(task.window, settings.voxel, settings.max_source);
+    // The source already lives in S. Do not re-anchor it at I_M or transform it
+    // by the snapshot pose again; the solver must return W<-S.
+    const auto source = sample(task.local_map, settings.voxel, settings.max_source);
     RegistrationCloud::Ptr current(new RegistrationCloud);
-    const auto &latest = task.window.entries().back();
-    pcl::transformPointCloud(*latest.cloud, *current, latest.odom_pose.matrix().cast<float>().eval());
+    pcl::transformPointCloud(*task.current_cloud, *current, task.local_from_current.matrix().cast<float>().eval());
     current = sample(current, settings.voxel, settings.max_source);
     RegistrationCloud::ConstPtr target_input = task.reference;
     if (task.world_from_local_hint && crop_radius > 0)
     {
       RegistrationCloud::Ptr cropped(new RegistrationCloud);
-      const Eigen::Vector3d centre = ((*task.world_from_local_hint) * latest.odom_pose.matrix()).block<3, 1>(0, 3);
+      const Eigen::Vector3d centre = ((*task.world_from_local_hint) * task.local_from_current.matrix()).block<3, 1>(0, 3);
       for (const auto &p : *task.reference)
         if ((p.getVector3fMap().cast<double>() - centre).squaredNorm() <= crop_radius * crop_radius)
           cropped->push_back(p);

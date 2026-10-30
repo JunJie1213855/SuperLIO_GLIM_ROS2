@@ -51,6 +51,7 @@ namespace super_lio_slam
     double normal_radius = 1.0;
     double feature_radius = 2.5;
     double feature_ratio = 0.9;
+    std::string feature_matching = "mutual_ratio";
     double hint_radius = 3.0;
     int min_pairs = 6;
     int max_pairs = 200;
@@ -58,6 +59,9 @@ namespace super_lio_slam
     double noise_bound = 0.3;
     int rotation_iterations = 100;
     double clique_seconds = 0.05;
+    bool exact_clique = false;
+    double rotation_gnc_factor = 1.4;
+    double rotation_cost_threshold = 1e-6;
     int threads = 2;
     double coarse_radius = 0.6;
     int coarse_min_inliers = 6;

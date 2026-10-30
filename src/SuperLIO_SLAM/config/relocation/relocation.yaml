@@ -6,19 +6,15 @@ relocation_node:
     lio.relocation.init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     # Empty means sensor YAML's lio.map.save_map_dir + lio.map.map_name.
     relocation.map_path: ""
+    relocation.debug_snapshot_dir: ""  # optional: latest actual source.pcd + snapshot.json
     # Yellow display-only local voxel map; removed on successful handoff.
     relocation.visualize_local_map: true
     relocation.local_map_visualization_interval_s: 0.5
-    relocation.local_map_visualization_max_points: 50000
+    relocation.local_map_visualization_max_points: 200000
     relocation.use_initial_pose: false
     relocation.map_crop_radius_m: 80.0  # 0 disables crop; no hint also uses the whole map
-    relocation.window_min_frames: 5
-    relocation.window_max_frames: 10
-    relocation.window_max_duration_s: 3.0
-    relocation.window_max_travel_m: 5.0
-    relocation.keyframe_distance_m: 0.2
-    relocation.keyframe_angle_deg: 5.0
-    relocation.keyframe_max_interval_s: 0.3
+    # Register the cumulative local LIO voxel map, never a recent-frame window.
+    relocation.registration_min_frames: 5
     relocation.registration_interval_s: 1.0
     relocation.local_min_plane_points: 30
     # Brief stationary/low-dynamics bootstrap, followed by moving accumulation.
@@ -27,30 +23,36 @@ relocation_node:
     relocation.imu_init_duration_s: 0.3
     relocation.imu_max_gyro_rad_s: 0.05
     relocation.imu_max_gyro_std: 0.02
-    relocation.imu_max_accel_std: 0.15
+    relocation.imu_max_accel_std: 0.5
     relocation.max_gravity_angle_deg: 10.0
     # Conservative covariance inflation, not a calibrated GICP covariance.
     relocation.registration_position_sigma_m: 0.2
     relocation.registration_rotation_sigma_deg: 2.0
 
-    registration_voxel_size_m: 0.5
+    # Global coarse profile aligned with register_ws/teaserpp_registration.
+    registration_voxel_size_m: 0.3
     registration_min_points: 100
-    registration_max_source_points: 10000
-    registration_max_target_points: 50000
-    fpfh_normal_radius_m: 1.0
-    fpfh_feature_radius_m: 2.5
+    # Point caps apply to the whole map after voxel filtering; 0 disables a cap.
+    registration_max_source_points: 1000000
+    registration_max_target_points: 5000000
+    fpfh_normal_radius_m: 0.9
+    fpfh_feature_radius_m: 1.5
+    fpfh_matching_mode: "nearest"  # one-way NN; mutual_ratio retains the old matcher
     fpfh_distance_ratio_threshold: 0.9
     fpfh_pose_hint_radius_m: 3.0
     correspondence_min_unique: 6
-    correspondence_max_unique: 200
+    correspondence_max_unique: 2000
     correspondence_min_baseline_m: 2.0
     teaser_noise_bound_m: 0.3
     teaser_rotation_max_iterations: 100
-    teaser_max_clique_time_limit_s: 0.05
-    teaser_max_clique_num_threads: 2
+    teaser_inlier_selection: "pmc_exact"
+    teaser_rotation_gnc_factor: 1.4
+    teaser_rotation_cost_threshold: 0.0001
+    teaser_max_clique_time_limit_s: 30.0
+    teaser_max_clique_num_threads: 4
     coarse_residual_threshold_m: 0.6
     coarse_min_inliers: 3
-    coarse_min_inlier_ratio: 0.1
+    coarse_min_inlier_ratio: 0.01
     coarse_max_inlier_rmse_m: 0.4
     gicp_max_iterations: 40
     gicp_correspondence_randomness: 20

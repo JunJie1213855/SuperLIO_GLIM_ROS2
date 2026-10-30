@@ -100,11 +100,15 @@ ros2 launch super_lio_slam relocation.launch.py \
   map_path:="$OUT/reference_map.pcd" rviz:=true
 ```
 
+当前重定位默认采用独立 TEASER++ 工具的全局粗配准配置：`fpfh_matching_mode: nearest`、最多 2000 对、`teaser_inlier_selection: pmc_exact`、最大团预算 30 秒；体素/法向/特征半径为 0.3/0.9/1.5 米。启动日志应显示该配置。后台求解可能较慢，前端继续运行；回环仍保留原有轻量配置。
+
 另一终端启动传感器或重新播放 `ros2 bag play "$BAG" --rate 0.5`，查看状态：
 
 ```bash
 ros2 topic echo /lio/relocation/status --qos-durability transient_local --qos-reliability reliable
 ```
+
+重定位直接使用固定 S 系下的累积局部体素地图快照，不使用滑动窗口；后台异步配准，成功后对齐最新状态。`relocation.registration_min_frames`（默认 5）控制首次配准前的成功跟踪帧数，`relocation.registration_interval_s` 控制任务间隔。
 
 `WAITING_FOR_STATIONARY_IMU → LOCAL_TRACKING → WORLD_MAP_TRACKING` 表示初始化、局部 LIO、定位成功并进入参考地图跟踪。开始时需要短暂静止或低动态；默认不修改参考地图。
 

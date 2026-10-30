@@ -1,6 +1,6 @@
 # 重定位的坐标系、运动补偿、状态接管与协方差理论
 
-本文依据当前 SuperLIO_SLAM 重定位实现整理，日期为 2026-10-29。统一从参考地图世界系、局部 LIO 坐标系出发，推导多帧累积、粗精配准、异步结果接管和 ESKF 协方差变换。
+本文依据当前 SuperLIO_SLAM 重定位实现整理，日期为 2026-10-30。统一从参考地图世界系、局部 LIO 坐标系出发，推导多帧累积、粗精配准、异步结果接管和 ESKF 协方差变换。
 
 文中明确区分三类内容：
 
@@ -72,7 +72,7 @@ $$
     ↓
 固定局部系 S 中运行 LIO
     ↓
-去畸变、局部地图匹配、选择关键帧、运动补偿累积
+去畸变、局部地图匹配、更新 S 系累积体素地图、冻结配准快照
     ↓
 后台 FPFH → TEASER++ → GICP，估计 T_W_S
     ↓
@@ -150,62 +150,39 @@ $$
 
 如果输入没有逐点时间，将时间偏移全部置零无法恢复真实扫描运动。关闭缺少 time 字段的日志只改变打印行为，不解决去畸变问题。
 
-### 4.2 固定局部系中的多帧累积
+### 4.2 固定局部系中的累积地图
 
-每个保留关键帧保存：
-
-$$
-\bigl(t_i,\ T_{S,I_i},\ \mathcal P_{I_i}\bigr),
-$$
-
-其中 \(\mathcal P_{I_i}\) 已在 IMU 扫描参考坐标系中表达。累积源子图为：
+设扫描参考系为 \(I_n\)，其 LIO 位姿为 \(T_{S,I_n}\)。截至第 M 帧，理想累积地图为：
 
 $$
 \boxed{
-\mathcal P_S
-=
-\bigcup_{i\in\mathcal W}
-T_{S,I_i}\mathcal P_{I_i}.
+\mathcal P_S^{(M)}
+=\operatorname{Voxel}\left(\bigcup_{n=1}^{M}T_{S,I_n}\mathcal P_{I_n}\right).
 }
 $$
 
-实际还会进行体素降采样和点数限制。
+当前重定位直接提取局部 LIO 的 `local_ivox_` 全部保留点，生成不可变 S 系点云快照，不再保存或拼接滑动窗口。它沿用 LIO 的点筛选、体素表示与容量策略，因此不是原始扫描的无损并集，也不能恢复已过滤或容量淘汰的点；没有另外施加最近帧数、时间跨度或行程裁剪。
 
-**当前重定位实现固定 \(S\)**：fixedFrameCloud() 直接使用每个窗口成员的局部 LIO 位姿变换点云。
+每个后台任务同时保存：地图快照 \(\mathcal P_S^{(M)}\)、同一时刻的 \(T_{S,I_M}\)、时间 \(t_M\)、当前扫描和 generation。扫描仅用于质量验收；配准源是累积地图，不能再乘一次 \(T_{S,I_M}\)，也不以 M 帧为新原点。
 
-它不同于回环中以当前帧 \(c\) 为锚点的形式：
+### 4.3 异步快照与最新帧接管
 
-$$
-\mathcal P_{I_c}
-=
-\bigcup_i T_{S,I_c}^{-1}T_{S,I_i}\mathcal P_{I_i}.
-$$
+默认成功跟踪至少 5 帧后可提交任务（`relocation.registration_min_frames`），随后按传感器时间间隔提交。运行中的任务不被新扫描中断，待处理任务只保留最新快照，地图和快照之间不共享可变点云。
 
-两种形式都能构造运动补偿子图，但配准结果的坐标含义不同：
-
-- 固定 \(S\) 子图与世界地图配准，结果是 \(T_{W,S}\)。
-- 当前锚点子图与世界地图配准，结果是 \(T_{W,I_c}\)；若要切换固定局部系，需再计算
-  \[
-  T_{W,S}=T_{W,I_c}T_{S,I_c}^{-1}.
-  \]
-
-不能把当前代码的 \(T_{W,S}\) 直接当成“最新 IMU 位姿”。
-
-### 4.3 关键帧选择和滑窗
-
-当前满足以下任一条件即保留关键帧：
+若第 M 帧地图配准得到 \(T_{\mathrm{reg}}=T_{W,S}\)，返回时前端已运行到第 N 帧，则：
 
 $$
-\|\Delta p\|\ge d_{\mathrm{kf}},
-\quad
-\angle(\Delta R)\ge\theta_{\mathrm{kf}},
-\quad
-\Delta t\ge t_{\mathrm{kf}}.
+\boxed{
+T_{W,I_N}
+=\left(T_{\mathrm{reg}}T_{S,I_M}\right)
+ \left(T_{S,I_M}^{-1}T_{S,I_N}\right)
+=T_{\mathrm{reg}}T_{S,I_N}.
+}
 $$
 
-默认分别为 0.2 m、5°、0.3 s。窗口由帧数、时间跨度、累计路程共同约束，默认最多 10 帧、3 s、5 m，至少 5 帧才提交配准任务。
+M 小于 N 不构成拒绝原因；新任务失败也不会在前端消费前覆盖一个成功待提交结果。仍须检查 generation、局部跟踪质量和最新扫描，再变换最新 ESKF 状态及协方差，不回退滤波器时间。
 
-固定坐标系下累积并不消除 LIO 漂移：若窗口内相对运动错误，源子图会发生非刚性畸变，单个刚体配准变换无法完全修复。因此窗口不能只追求“点越多越好”。
+`registration_max_source_points`、`registration_max_target_points` 是对完整地图体素过滤后的空间采样上限，0 表示不追加点数限制。抽点不会改成最近帧窗口。累积地图越大，快照复制和配准开销越高，可通过体素大小、点数上限和任务间隔控制；LIO 漂移造成的地图内部畸变也不会由一个刚体变换完全消除。
 
 ## 5. 初始位姿与参考地图范围
 
@@ -233,7 +210,7 @@ $$
 \widehat T_{W,S}T_{S,I}(t).
 $$
 
-当前支持配置中的初始位姿以及 /initialpose。带非零时间戳的运行时初始位姿，需要在窗口内匹配时间接近的局部关键帧；当前容差为 0.25 s。
+当前支持配置中的初始位姿以及 /initialpose。带非零时间戳的运行时初始位姿，通过最近 5 秒的纯位姿记录匹配时间接近的局部状态，容差为 0.25 s。这些记录不含点云，不用于限制配准地图范围。
 
 有先验且裁剪半径 \(r>0\) 时，参考点云按最新预测位置裁剪：
 
@@ -246,7 +223,7 @@ q\in\mathcal M_W:
 \right\}.
 $$
 
-默认 \(r=80\) m；无先验或裁剪半径为零时不裁剪。默认配置启用初始位姿，因此全零初值也是一个被使用的先验，不等于“没有先验”。
+默认 \(r=80\) m；无先验或裁剪半径为零时不裁剪。当前 YAML 关闭初始位姿；启用后全零初值也是一个被使用的先验，不等于“没有先验”。
 
 先验失败后的无提示重试仍使用已经选出的目标区域；它不会自动扩展为整张地图。要进行整图尝试，应明确关闭先验或关闭裁剪。
 
@@ -261,6 +238,10 @@ b_j=Aa_j+t+\epsilon_j.
 $$
 
 FPFH 用于产生候选对应；TEASER++ 对存在大量错误对应的集合求鲁棒旋转和平移。它需要足够的正确对应、合理的空间分布和适当噪声模型，不保证任意重复场景都能正确定位。
+
+当前重定位默认使用全局粗配准配置：FPFH 单向最近邻、不做比率和双向一致性筛选，按源点索引均匀取最多 2000 对，使用 PMC_EXACT（最大团阶段 30 秒预算）和 GNC_TLS；体素、法向与描述子半径分别为 0.3、0.9、1.5 m。参数与独立 `teaserpp_registration` 工具对齐。粗几何内点仍以 0.6 m 残差判断，再执行现有数量、比例和 RMSE 验收。
+
+在线回环继续采用 mutual_ratio、空间分散的 200 对、PMC_HEU 短预算。算法共享实现，配置分别加载；不能把重定位的全局配置自动视作回环参数。
 
 得到粗变换：
 
@@ -326,7 +307,7 @@ $$
 
 - 收敛、有限值、合法旋转。
 - GICP 相对粗初值的修正幅度。
-- 源子图覆盖率、窗口最新单帧覆盖率和有效近邻数量。
+- 累积源地图覆盖率、快照单帧覆盖率和有效近邻数量。
 - 有效近邻 MSE。
 - 根据目标法向形成的归一化信息矩阵特征值比，用于拒绝明显退化。
 - 配准后重力方向与地图负 Z 方向的夹角，默认不超过 10°。
@@ -863,7 +844,7 @@ $$
 
 1. 将最新 ESKF 状态及前向预测状态转换到 \(W\)。
 2. 切换为预先加载的参考体素地图，释放局部地图。
-3. 清除旧坐标系点云缓存和局部滑窗。
+3. 清除旧坐标系点云缓存和局部位姿记录，释放局部地图。
 4. 更新输出参考系，清空旧局部轨迹，避免一条 Path 混合两个坐标系。
 5. 进入 WORLD_MAP_TRACKING，停止新的后台重定位任务。
 
@@ -896,16 +877,13 @@ $$
 
 | 参数 | 默认值 | 理论意义 |
 |---|---:|---|
-| relocation.window_min_frames | 5 | 最少累积关键帧 |
-| relocation.window_max_frames | 10 | 窗口帧数上限 |
-| relocation.window_max_duration_s | 3.0 s | 窗口时间跨度上限 |
-| relocation.window_max_travel_m | 5.0 m | 窗口累计运动路程上限 |
+| relocation.registration_min_frames | 5 | 首次配准前的最少成功局部跟踪帧数；不是窗口大小 |
 | relocation.registration_interval_s | 1.0 s | 基于传感器时间的任务提交间隔 |
 | relocation.map_crop_radius_m | 80.0 m | 有先验时的参考地图裁剪半径 |
 | relocation.max_gravity_angle_deg | 10° | 世界重力方向验收 |
-| coarse_min_inliers | 6 | 最少粗对应内点 |
-| coarse_min_inlier_ratio | 0.3 | 最低粗内点比例 |
-| coarse_max_inlier_rmse_m | 0.3 m | 粗对应内点 RMSE 上限 |
+| coarse_min_inliers | 3 | 最少粗对应内点 |
+| coarse_min_inlier_ratio | 0.01 | 最低粗内点比例 |
+| coarse_max_inlier_rmse_m | 0.4 m | 粗对应内点 RMSE 上限 |
 | quality_min_source_overlap | 0.8 | 源子图覆盖率严格大于该值 |
 | quality_min_current_frame_overlap | 0.8 | 最新单帧覆盖率严格大于该值 |
 | quality_max_inlier_mse_m2 | 0.1 m² | 精配准及最新扫描复查 MSE 严格小于该值 |
@@ -918,15 +896,15 @@ $$
 
 | 环节 | 当前代码 |
 |---|---|
-| 地图加载、IMU 初始化、局部跟踪、关键帧、任务与接管 | [super_lio_reloc.cpp](../src/lio/super_lio_reloc.cpp) |
-| 固定 S 系点云、先验裁剪、TEASER++ / GICP 组合、重力检查 | [RelocationRegistration.cpp](../src/lio/RelocationRegistration.cpp) |
-| 配准快照与结果定义 | [RelocationRegistration.h](../include/lio/RelocationRegistration.h) |
-| 误差状态排列与 18×18 协方差 | [ESKF.h](../include/lio/ESKF.h) |
-| ChangeReferenceFrame()、状态注入、传播缓存 | [ESKF.cpp](../src/lio/ESKF.cpp) |
-| 粗配准与几何内点检查 | [TeaserCoarseRegistration.cpp](../src/loop/TeaserCoarseRegistration.cpp) |
-| 精配准、覆盖率、MSE 和退化诊断 | [GicpRegistration.cpp](../src/loop/GicpRegistration.cpp) |
-| 点云、位姿、TF 和参考系切换 | [ROSWrapper.cpp](../src/ros/ROSWrapper.cpp) |
-| 启动和独立重定位参数 | [relocation.launch.py](../launch/relocation.launch.py)、[relocation.yaml](../src/SuperLIO_SLAM/config/relocation/relocation.yaml) |
+| 地图加载、IMU 初始化、局部跟踪、关键帧、任务与接管 | [super_lio_reloc.cpp](../src/SuperLIO_SLAM/src/lio/super_lio_reloc.cpp) |
+| 固定 S 系点云、先验裁剪、TEASER++ / GICP 组合、重力检查 | [RelocationRegistration.cpp](../src/SuperLIO_SLAM/src/lio/RelocationRegistration.cpp) |
+| 配准快照与结果定义 | [RelocationRegistration.h](../src/SuperLIO_SLAM/include/lio/RelocationRegistration.h) |
+| 误差状态排列与 18×18 协方差 | [ESKF.h](../src/SuperLIO_SLAM/include/lio/ESKF.h) |
+| ChangeReferenceFrame()、状态注入、传播缓存 | [ESKF.cpp](../src/SuperLIO_SLAM/src/lio/ESKF.cpp) |
+| 粗配准与几何内点检查 | [TeaserCoarseRegistration.cpp](../src/SuperLIO_SLAM/src/loop/TeaserCoarseRegistration.cpp) |
+| 精配准、覆盖率、MSE 和退化诊断 | [GicpRegistration.cpp](../src/SuperLIO_SLAM/src/loop/GicpRegistration.cpp) |
+| 点云、位姿、TF 和参考系切换 | [ROSWrapper.cpp](../src/SuperLIO_SLAM/src/ros/ROSWrapper.cpp) |
+| 启动和独立重定位参数 | [relocation.launch.py](../src/SuperLIO_SLAM/launch/relocation.launch.py)、[relocation.yaml](../src/SuperLIO_SLAM/config/relocation/relocation.yaml) |
 
 当前实现的确定性参考系变换与其右乘姿态误差定义一致。完整的配准不确定性与相关性传播仍是后续工作。
 

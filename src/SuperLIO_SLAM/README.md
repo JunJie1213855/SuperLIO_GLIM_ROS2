@@ -6,7 +6,7 @@ ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。完整运�
 
 - 回环默认使用 **STD → 时间/距离筛选 → 多帧 FPFH / TEASER++ → GICP → iSAM2**；普通 ICP 已移除，直接 GICP 保留为对照。
 - 关键帧/STD、异步配准、地图重建分开执行。队列过载只淘汰旧检测任务，不删除关键帧和图节点；地图请求合并为最新快照。
-- 重定位在固定局部系累积经逐帧位姿补偿的点云，配准后变换最新 KF 状态和协方差，切换世界参考地图。
+- 重定位直接配准固定 S 系累积局部地图快照，不使用滑动窗口，配准后变换最新 KF 状态和协方差，切换世界参考地图。
 - 点云、位姿、关键帧和 TF 保留传感器时间。默认无需 `/clock`，旧时间对齐参数弃用并忽略。
 - 室内/室外配准 YAML 独立；RViz 默认强度伪彩色、3 像素、Alpha 1，地图独立体素滤波。
 - 日志对 `accepted` / `rejected` 和最终 `stage` 理由使用绿/红色，数值保持原色。
@@ -158,9 +158,34 @@ ros2 launch super_lio_slam relocation.launch.py \
   map_path:=/absolute/path/to/reference_map.pcd rviz:=true
 ```
 
-先短暂静止完成 IMU 初始化，再在局部系 S 中运行 LIO，并累积 `M_S = union(T_S_Ik * P_k)`。
-异步执行 FPFH / TEASER++ / GICP；提交前复核最新扫描，以 `T_W_Ilatest = T_W_S * T_S_Ilatest`
-变换 KF 的姿态、位置、速度、重力、协方差和预测缓存，保留偏置及传感器时间。
+先短暂静止完成 IMU 初始化，再在固定局部系 S 中运行 LIO。配准源是 `local_ivox_` 中全部保留点的不可变快照，不使用最近帧窗口；同时保存快照位姿和当前扫描。
+成功跟踪至少 `relocation.registration_min_frames` 帧后，按 `relocation.registration_interval_s` 间隔异步执行 FPFH / TEASER++ / GICP；提交前复核最新扫描，以 `T_W_Ilatest = T_W_S * T_S_Ilatest`
+变换 KF 的姿态、位置、速度、重力、协方差和预测缓存，保留偏置及传感器时间。后台运行一个任务、只保留一个最新待处理快照；旧快照成功也可以对齐最新帧。
+`registration_max_source_points` / `registration_max_target_points` 为完整地图降采样后的点数上限，0 关闭上限；旧 `relocation.window_*` 和 `relocation.keyframe_*` 配置已弃用。
+
+重定位全局粗配准默认与 `register_ws/teaserpp_registration` 对齐：
+
+| 参数 | 重定位默认配置 |
+|---|---|
+| `fpfh_matching_mode` | `nearest`：单向最近邻，允许多个源点匹配同一目标点 |
+| `correspondence_max_unique` | 2000；历史参数名，nearest 模式下表示对应数上限 |
+| `registration_voxel_size_m` / `fpfh_normal_radius_m` / `fpfh_feature_radius_m` | 0.3 / 0.9 / 1.5 m |
+| `teaser_inlier_selection` | `pmc_exact`；可选 `pmc_heuristic` |
+| `teaser_max_clique_time_limit_s` | 30 s，仅为最大团阶段预算，不是整个任务耗时上限 |
+| `teaser_rotation_gnc_factor` / `teaser_rotation_cost_threshold` | 1.4 / 0.0001 |
+
+`mutual_ratio` 可恢复原匹配筛选；nearest 模式不做比率、双向一致性或位姿半径筛选，先验仍可用于地图裁剪与坐标变换。点云、粗内点与 GICP/最新扫描质量验收仍然执行。在线回环保持原有 mutual_ratio、200 对与启发式最大团配置。
+
+无需 ROS/DDS 可复现生产粗配准函数的离线对照：
+
+```bash
+build/super_lio_slam/relocation_pcd_check reference_map_local.pcd data/reference_map_urban.pcd global /tmp/relocation_global.json
+# 将 global 换成 legacy 可检查旧配置；legacy_geometry 保持新几何半径但使用旧匹配/求解。
+```
+
+若要对比真实在线输入，可设置 `relocation.debug_snapshot_dir: "/tmp/superlio_relocation_snapshot"`，后台每次只覆盖最新 `source.pcd` 和包含时间/位姿的 `snapshot.json`，不录制 rosbag。将独立工具的 source 指向这个 `source.pcd`，才是同一输入的对照。默认关闭；长任务退出时可能需等待配准结束。
+
+实际 PCD 对照见 [验证记录](../../docs/validation/2026-10-31/relocation_coarse_ab.json)。保存的完整地图与实时小范围地图不等价，离线成功不保证每个在线快照都能定位成功。
 
 成功后使用参考地图跟踪，默认不更新地图。TF 为 `world → odom_local → imu`；
 输出在定位前为 odom_local、成功后为 world。重定位不向回环后端发布关键帧。

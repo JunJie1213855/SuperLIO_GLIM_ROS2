@@ -78,7 +78,7 @@ def main():
         'lio.kf.kf_max_iterations':4, 'lio.kf.kf_quit_eps':.001,
         'lio.sensor.imu_na':.1,'lio.sensor.imu_ng':.1,
         'lio.sensor.imu_nba':.0001,'lio.sensor.imu_nbg':.0001,
-        'relocation.window_min_frames':8, 'relocation.keyframe_max_interval_s':.2,
+        'relocation.registration_min_frames':8,
         'relocation.registration_interval_s':.5, 'registration_voxel_size_m':.3,
         'relocation.local_map_visualization_interval_s':.1,
         'relocation.local_map_visualization_max_points':200,

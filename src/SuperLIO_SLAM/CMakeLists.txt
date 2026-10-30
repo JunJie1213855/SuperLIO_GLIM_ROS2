@@ -58,7 +58,7 @@ add_library(submap_registration STATIC
 set_target_properties(submap_registration PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(submap_registration PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include ${PCL_INCLUDE_DIRS})
-target_link_libraries(submap_registration PUBLIC Eigen3::Eigen ${PCL_LIBRARIES})
+target_link_libraries(submap_registration PUBLIC Eigen3::Eigen ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
 if(SUPERLIO_WITH_TEASER)
   target_compile_definitions(submap_registration PUBLIC SUPERLIO_WITH_TEASER)
   target_link_libraries(submap_registration PUBLIC teaserpp::teaser_registration)
@@ -163,6 +163,8 @@ ament_package()
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(relocation_pcd_check test/relocation_pcd_check.cpp)
+  target_link_libraries(relocation_pcd_check PRIVATE submap_registration)
   add_executable(optimized_map_writer_test test/optimized_map_writer_test.cpp src/loop/OptimizedMapWriter.cpp)
   target_include_directories(optimized_map_writer_test PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(optimized_map_writer_test PRIVATE Eigen3::Eigen ${PCL_LIBRARIES})

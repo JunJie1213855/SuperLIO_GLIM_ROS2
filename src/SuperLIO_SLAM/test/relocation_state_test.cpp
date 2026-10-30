@@ -60,19 +60,25 @@ int main() {
       v[face/2]=low[face/2]+(face%2)*extent[face/2];
       pcl::PointXYZI p; p.getVector3fMap()=v; p.intensity=1; local->push_back(p);
     }
-    RelocationSnapshot task; task.generation=42; task.stamp=2; task.window=SubmapWindow({3,10,10});
+    RelocationSnapshot task; task.generation=42; task.stamp=2; task.frame_count=3;
+    RegistrationCloud::Ptr accumulated(new RegistrationCloud);
     for(int frame=0;frame<3;++frame) {
       Eigen::Isometry3d pose=Eigen::Isometry3d::Identity();
       pose.linear()=Eigen::AngleAxisd(.15*frame,Eigen::Vector3d::UnitZ()).toRotationMatrix();
       pose.translation()=Eigen::Vector3d(frame,-.3*frame,0);
       RegistrationCloud::Ptr scan(new RegistrationCloud);
       pcl::transformPointCloud(*local,*scan,pose.inverse().matrix().cast<float>().eval());
-      task.window.append({static_cast<std::size_t>(frame),static_cast<double>(frame),pose,scan});
+      RegistrationCloud aligned;
+      pcl::transformPointCloud(*scan,aligned,pose.matrix().cast<float>().eval());
+      *accumulated+=aligned;
+      task.current_cloud=scan;
+      task.local_from_current=pose;
     }
-    const auto merged=fixedFrameCloud(task.window,0,0);
-    require(merged->size()==3*local->size(),"fixed-S accumulation lost points");
-    for(std::size_t k=0;k<merged->size();++k)
-      require(((*merged)[k].getVector3fMap()-(*local)[k%local->size()].getVector3fMap()).norm()<1e-4,"moving frames not aligned to S");
+    task.local_map.reset(new RegistrationCloud(*accumulated));
+    accumulated->clear(); // Frontend map updates must not mutate the worker snapshot.
+    require(task.local_map->size()==3*local->size(),"cumulative map snapshot lost points");
+    for(std::size_t k=0;k<task.local_map->size();++k)
+      require(((*task.local_map)[k].getVector3fMap()-(*local)[k%local->size()].getVector3fMap()).norm()<1e-4,"map snapshot is not expressed in fixed S");
 #ifdef SUPERLIO_WITH_TEASER
     Eigen::Isometry3d truth=Eigen::Isometry3d::Identity();
     truth.linear()=Eigen::AngleAxisd(.35,Eigen::Vector3d::UnitZ()).toRotationMatrix(); truth.translation()=Eigen::Vector3d(3,-2,0);
@@ -85,10 +91,30 @@ int main() {
     require(result.generation==42 && result.stamp==2,"registration snapshot identity lost");
     require(result.registration.accepted,"motion-compensated TEASER/GICP rejected");
     require((result.registration.transform-truth.matrix()).norm()<.1,"solver returned W<-I instead of W<-S");
+    Eigen::Isometry3d latest=task.local_from_current;
+    latest.translation()+=Eigen::Vector3d(8,-2,1);
+    latest.linear()=latest.linear()*Eigen::AngleAxisd(.4,Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    const Eigen::Matrix4d via_snapshot=result.registration.transform*task.local_from_current.matrix()*
+        (task.local_from_current.inverse()*latest).matrix();
+    require((via_snapshot-result.registration.transform*latest.matrix()).norm()<1e-10,
+            "successful snapshot M cannot be transported to latest N");
+    auto empty=task; empty.local_map.reset();
+    require(registerRelocation(empty,settings,80,10).registration.reason=="empty_relocation_snapshot",
+            "empty cumulative map accepted");
+    auto global_settings=settings;
+    global_settings.feature_matching="nearest";
+    global_settings.max_pairs=1000;
+    global_settings.exact_clique=true;
+    global_settings.clique_seconds=2.;
+    global_settings.threads=2;
+    global_settings.rotation_cost_threshold=1e-4;
+    const auto global_result=registerRelocation(task,global_settings,80,10);
+    require(global_result.registration.accepted && (global_result.registration.transform-truth.matrix()).norm()<.1,
+            "global matcher lost W<-S transform or failed snapshot scan quality");
     task.local_gravity=Eigen::Vector3d(9.81,0,0);
     const auto tilted=registerRelocation(task,settings,80,10);
     require(!tilted.registration.accepted && tilted.registration.reason=="gravity_mismatch","gravity mismatch accepted");
 #endif
-    std::cout<<"PASS: ESKF state/covariance/clocks, forward continuity, fixed-S motion accumulation and registration"<<std::endl;
+    std::cout<<"PASS: ESKF state/covariance/clocks, immutable cumulative S map, registration and M-to-N transport"<<std::endl;
   } catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<std::endl; return 1; }
 }

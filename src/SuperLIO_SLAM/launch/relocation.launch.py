@@ -27,7 +27,8 @@ def _relocation_node(context):
     return [Node(package='super_lio_slam',executable='relocation_node',name='relocation_node',namespace='',
                  output='screen',parameters=[LaunchConfiguration('sensor_config'),
                  LaunchConfiguration('relocation_config'),overrides],additional_env={'LD_LIBRARY_PATH':library_path},
-                 arguments=['--ros-args','--log-level',LaunchConfiguration('log_level')])]
+                 arguments=['--ros-args','--log-level',LaunchConfiguration('log_level')],
+                 sigterm_timeout='120',sigkill_timeout='120')]
 
 
 def generate_launch_description():

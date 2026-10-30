@@ -30,7 +30,7 @@ namespace LI2Sup
       Failed
     };
     bool initializeLocal();
-    void rememberFrame();
+    void rememberLocalPose();
     void enqueueRegistration();
     void registrationWorker();
     bool commitRegistration();
@@ -42,23 +42,29 @@ namespace LI2Sup
   private:
     Stage stage_ = Stage::Bootstrap;                 // 状态
     std::string status_;
+    std::string debug_snapshot_dir_;
     OctVoxMapType::Ptr local_ivox_, reference_ivox_; // 当前局部，参考
     BASIC::CloudPtr reference_cloud_;
     pcl::KdTreeFLANN<BASIC::PointType> reference_tree_;
-    super_lio_slam::SubmapWindow window_;            // 局部子图窗口
+    struct LocalPose
+    {
+      double stamp;
+      BASIC::SE3 pose;
+    };
+    // Pose-only timestamp lookup for /initialpose, never a registration cloud window.
+    std::deque<LocalPose> prior_pose_history_;
     super_lio_slam::RegistrationSettings settings_;
     std::deque<IMUData> initialization_imu_;
     std::size_t imu_samples_ = 50;
-    int min_frames_ = 5, min_plane_points_ = 30;
+    int registration_min_frames_ = 5, min_plane_points_ = 30;
     double init_duration_ = .3, max_gyro_ = .15, max_gyro_std_ = .02, max_accel_std_ = .15;
-    double keyframe_distance_ = .2, keyframe_angle_ = 5.0, keyframe_interval_ = .3;
     double registration_interval_ = 1.0, crop_radius_ = 80.0, gravity_angle_ = 10.0;
     double position_variance_ = .04, rotation_variance_ = .0012184697;
     double last_scan_time_ = -1, last_task_time_ = -1;
     bool tracking_good_ = false, have_prior_ = true;
     BASIC::SE3 prior_pose_, prior_local_pose_;
     std::uint64_t generation_ = 1;
-    std::size_t next_frame_ = 0;
+    std::size_t local_frame_count_ = 0;
     std::mutex registration_mutex_;
     std::condition_variable registration_cv_;
     std::optional<super_lio_slam::RelocationSnapshot> pending_task_;
