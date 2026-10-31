@@ -7,12 +7,12 @@
 每个终端先执行：
 
 ```bash
-export WS=/home/ros/ros_ws/SuperLIO_GLIM_ROS2
+export WS=/home/ros/rosws/SuperLIO_GLIM_ROS2
 export OUT="$WS/maps"
 export BAG=/home/ros/dataset/urbannav/2020-03-14-16-45-35
 cd "$WS"
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/livox_ros/install/setup.bash
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
 source install/setup.bash
 mkdir -p "$OUT"
 ```
@@ -26,6 +26,48 @@ mkdir -p "$OUT"
 
 下文默认不使用仿真时钟。需要时，在 launch 增加 `use_sim_time:=true`，播放器配套增加 `--clock`。每次从头重放或更换会话，都重启算法。
 
+### WSL 下地图或轨迹更新慢
+
+**优先限制 bag 播放的话题。** UrbanNav 除点云和 IMU 外还包含图像、GPS 等数据；省略 `--topics` 会回放全部话题，增加不必要的读取和发布开销。本机遇到的卡顿在只播放 `/velodyne_points` 和 `/imu/data` 后恢复流畅，因此下文建图和重定位示例均默认过滤话题。
+
+话题名须与 bag 及传感器 YAML 一致：本例是 `/velodyne_points`（末尾有 `s`）。可用 `ros2 bag info "$BAG"` 查看实际话题。若过滤后已正常，无需继续调整 DDS；仍有延迟时再检查下面的网络与读取问题。
+
+CPU、内存空闲时，卡顿也可能来自输入等待。播放器持续出现 `Message queue starved` 表示回放队列缺少数据；DDS 网络的 IP 分片重组失败也会使大点云延迟或丢失。通过 `/mnt/d` 读取 Windows 盘中的大 bag 可能增加读取开销，这与 DDS 传输问题需要分别排查。
+
+本工作区提供 [Cyclone DDS 配置](../src/SuperLIO_SLAM/config/common/cyclonedds_wsl.xml)：UDP 消息上限 1200 B、DDS 分片大小 1024 B、收发 socket 缓冲区最小 8 MB，用于缓解已观察到的 WSL mirrored 网络大包传输问题。配置不会自动启用；先安装中间件（仅需一次）：
+
+```bash
+sudo apt install ros-humble-rmw-cyclonedds-cpp
+```
+
+停止旧的建图、播放器和 RViz。**每个终端执行第 0 节的环境命令后，再执行以下设置**，然后重新启动对应进程：
+
+```bash
+export ROS_DOMAIN_ID=42
+export ROS_LOCALHOST_ONLY=1
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export CYCLONEDDS_URI="file://$WS/src/SuperLIO_SLAM/config/common/cyclonedds_wsl.xml"
+```
+
+建图终端使用下文原 launch 命令；UrbanNav 播放终端先只发布点云和 IMU，半速确认后再提高到 `--rate 1.0`：
+
+```bash
+ros2 bag play "$BAG" \
+  --topics /velodyne_points /imu/data \
+  --read-ahead-queue-size 5000 --rate 0.5
+```
+
+其他传感器需换成对应点云/IMU 话题。若仍持续断粮，将同一 bag 复制到 WSL 的 `/home/ros/dataset/` 后，以相同话题和速率对比；增大预读队列会增加内存用量，无法弥补持续不足的读取速度。
+
+确认当前终端选用的中间件：
+
+```bash
+python3 -c 'from rclpy.utilities import get_rmw_implementation_identifier; print(get_rmw_implementation_identifier())'
+sysctl net.core.rmem_max net.core.wmem_max
+```
+
+应输出 `rmw_cyclonedds_cpp`；内核收发缓冲区上限需至少 8388608 字节，若更小可临时执行 `sudo sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608`。环境变量只影响之后启动的进程，切换后需重启节点；ROS CLI 发现异常时可执行 `ros2 daemon stop` 再查询。`ROS_LOCALHOST_ONLY=1` 适用于本机进程通信，跨机器 ROS 通信不能照搬；所有相关终端需使用相同 domain 和 DDS 配置。此配置与 `--clock` / `use_sim_time` 无关。优化地图默认每 30 个关键帧发布一次，刷新频率本身低于当前扫描与轨迹。
+
 ## 1. 基础建图定位（无回环）
 
 终端 A：
@@ -37,7 +79,7 @@ ros2 launch super_lio_slam vlp32.launch.py enable_loop_backend:=false rviz:=true
 终端 B：
 
 ```bash
-ros2 bag play "$BAG" --rate 0.5
+ros2 bag play "$BAG" --topics /velodyne_points /imu/data --rate 0.5
 ```
 
 使用实时传感器时，启动雷达/IMU 驱动替代 bag 播放。检查 YAML 中的话题、外参和点云时间单位。
@@ -102,7 +144,7 @@ ros2 launch super_lio_slam relocation.launch.py \
 
 当前重定位默认采用独立 TEASER++ 工具的全局粗配准配置：`fpfh_matching_mode: nearest`、最多 2000 对、`teaser_inlier_selection: pmc_exact`、最大团预算 30 秒；体素/法向/特征半径为 0.3/0.9/1.5 米。启动日志应显示该配置。后台求解可能较慢，前端继续运行；回环仍保留原有轻量配置。
 
-另一终端启动传感器或重新播放 `ros2 bag play "$BAG" --rate 0.5`，查看状态：
+另一终端启动传感器或重新播放 `ros2 bag play "$BAG" --topics /velodyne_points /imu/data --rate 0.5`，查看状态：
 
 ```bash
 ros2 topic echo /lio/relocation/status --qos-durability transient_local --qos-reliability reliable

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WSL mirrored-network profile for local ROS 2 point-cloud transport.
+     Load in every ROS terminal with CYCLONEDDS_URI=file:///absolute/path/to/this/file.
+     Set RMW_IMPLEMENTATION, ROS_DOMAIN_ID and ROS_LOCALHOST_ONLY separately;
+     placing this file in config/ does not enable it automatically. -->
+<CycloneDDS>
+  <Domain>
+    <General>
+      <!-- Keep UDP messages small to reduce IP fragmentation on the WSL route. -->
+      <MaxMessageSize>1200B</MaxMessageSize>
+      <FragmentSize>1024B</FragmentSize>
+    </General>
+    <Internal>
+      <!-- Minimum socket buffers; kernel limits must allow these sizes. -->
+      <SocketReceiveBufferSize min="8MB"/>
+      <SocketSendBufferSize min="8MB"/>
+    </Internal>
+  </Domain>
+</CycloneDDS>
