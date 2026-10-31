@@ -4,6 +4,8 @@ ROS 2 LiDAR / IMU 建图定位、在线回环、参考地图重定位与 GLIM �
 
 **运行命令见 [Quickstart](docs/quickstart.md)**：基础建图 → STD / 距离回环 → 保存地图 → 重定位 → 多会话合并。
 
+支持通过 CMake 选项 `SUPERLIO_USE_JEMALLOC=ON` 为算法节点直接链接 jemalloc，默认关闭。安装、编译和验证方法见 [Quickstart](docs/quickstart.md#可选jemalloc-内存分配器)。
+
 | 功能 | 当前流程 |
 |---|---|
 | 基础建图定位 | SuperLIO 前端 LIO，输出连续位姿与点云 |
