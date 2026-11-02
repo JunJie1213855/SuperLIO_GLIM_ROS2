@@ -102,9 +102,13 @@ namespace LI2Sup
   class OctVox
   {
   public:
+    // 初始化
     OctVox(const Point &pt, uint8_t local_idx)
     {
+      // 初始化，设置初始化掩膜
       counts_.fill(UNINIT_MASK);
+
+      // 记录初始化点的局部索引和计数
       points_[local_idx] = pt;
       counts_[local_idx] = 1;
     }
@@ -115,6 +119,8 @@ namespace LI2Sup
     {
       uint8_t &count = counts_[local_idx];
       Point &stored_point = points_[local_idx];
+
+      // 体素为空，存入第一个点
       if (count == UNINIT_MASK)
       {
         stored_point = pt;
@@ -122,19 +128,23 @@ namespace LI2Sup
         return;
       }
 
+      // 大于 20 个点
       if (count >= MAX_POINTS_PER_SUBVOXEL)
         return;
+      // 距离阈值大于 0.1 m 拒绝融合
       if ((pt - stored_point).squaredNorm() > DISTANCE_THRESHOLD_SQ)
         return;
-
+      // 记录新的均值和计数
       stored_point = (stored_point * count + pt) / (count + 1);
       ++count;
     }
 
     bool getPoint(const uint8_t local_idx, Point &pt) const
     {
+      // 如果只是掩膜，则未找到
       if (counts_[local_idx] == UNINIT_MASK)
         return false;
+      // 反之则返回对应索引的点
       pt = points_[local_idx];
       return true;
     }
@@ -144,8 +154,8 @@ namespace LI2Sup
     static constexpr double DISTANCE_THRESHOLD_SQ = 0.1 * 0.1; // 距离阈值
 
     // 体素信息
-    std::array<uint8_t, 8> counts_; // 计数
-    std::array<Point, 8> points_;   // 八个子点
+    std::array<uint8_t, 8> counts_; // 八个子体素的点数量计数
+    std::array<Point, 8> points_;   // 八个子体素的均值点
   };
 
   template <typename Point, typename Scalar>
@@ -158,7 +168,7 @@ namespace LI2Sup
     using KNNHeapType = KNNHeap<5, Point>;
     using OctVoxType = OctVox<Point>;
 
-    // 体素选项
+    // 体素参数，包括分辨率和预留容量
     struct Options
     {
       float resolution = 0.5;
@@ -174,6 +184,7 @@ namespace LI2Sup
     // 初始化
     OctVoxMap()
     {
+      // 记录近邻点云搜索点的七十点
       flat_search_ptrs_.reserve(flat_search_order_offsets.size());
       for (std::size_t i = 0; i < flat_search_order_offsets.size(); i++)
       {
@@ -287,7 +298,7 @@ namespace LI2Sup
     // 比 std::unordered_map 更加高效的数据结构，缓存亲和性更好
     tsl::robin_map<KEY, DATA_ITER, HASH_VEC> grids_;
 
-    // 
+    // 近邻访问缓存
     std::vector<uint8_t *> flat_search_ptrs_;
     int group_idx_max_;
   };
@@ -295,6 +306,7 @@ namespace LI2Sup
   template <typename Point, typename Scalar>
   void OctVoxMap<Point, Scalar>::insert(const Points &cloud_world)
   {
+    // 是否重置地图
     if (reset_map_)
     {
       reset_map_count_--;
@@ -306,34 +318,41 @@ namespace LI2Sup
       reset_map_ = false;
     }
 
+    // 将新增的世界地图点插入
     for (auto &pt : cloud_world)
     {
+      // 键值 = [pt / resolution]
       KEY fine_key = (pt * sub_inv_resolution_).array().floor().template cast<int>();
+      // 大体素坐标
       KEY key;
       key[0] = fine_key[0] >> 1;
       key[1] = fine_key[1] >> 1;
       key[2] = fine_key[2] >> 1;
 
+      // 子体素坐标
       uint8_t dx = fine_key[0] & 1;
       uint8_t dy = fine_key[1] & 1;
       uint8_t dz = fine_key[2] & 1;
       uint8_t local_idx = (dz << 2) | (dy << 1) | dx;
 
+      
       auto iter = grids_.find(key);
-      if (iter == grids_.end())
+
+      // LRU 插入逻辑，找到就更新，没找到就创建
+      if (iter == grids_.end()) // 如果没有对应的体素，就在哈希表 grids_ 和链表 data_ 中添加先添加
       {
         data_.emplace_front(std::piecewise_construct,
                             std::forward_as_tuple(key),
                             std::forward_as_tuple(pt, local_idx));
         grids_.insert(std::make_pair(key, data_.begin()));
 
-        if (data_.size() >= capacity_)
+        if (data_.size() >= capacity_) // 没有容量了，删除尾部不常用的缓存数据，再进行插入
         {
           grids_.erase(data_.back().first);
           data_.pop_back();
         }
       }
-      else
+      else // 如果存在对应的体素，就添加对应的数据，并且将其移动到链表头部
       {
         iter->second->second.AddPoint(pt, local_idx);
         data_.splice(data_.begin(), data_, iter->second);
@@ -344,16 +363,21 @@ namespace LI2Sup
   template <typename Point, typename Scalar>
   void OctVoxMap<Point, Scalar>::getTopK(const Point &point, KNNHeapType &top_K) const
   {
+    // 体素键值
     const KEY fine_key = (point * sub_inv_resolution_).array().floor().template cast<int>();
+    // 大体素键值
     KEY key;
     key[0] = fine_key[0] >> 1;
     key[1] = fine_key[1] >> 1;
     key[2] = fine_key[2] >> 1;
 
+    // 小体素键值
     const int dx = fine_key[0] & 1;
     const int dy = fine_key[1] & 1;
     const int dz = fine_key[2] & 1;
     const int local_idx = (dz << 2) | (dy << 1) | dx;
+
+    // 对称轴
     const KEY mirror_axis = KEY(1 - (dx << 1), 1 - (dy << 1), 1 - (dz << 1));
 
     const int pre_voxel_ptr_size = 8;
@@ -463,12 +487,14 @@ namespace LI2Sup
   void OctVoxMap<Point, Scalar>::getMap(std::vector<float> &output) const
   {
     size_t total_points = 0;
-
+    // 预留空间
     output.clear();
     output.reserve(total_points * 3);
 
     Point point;
     float pcl_point[3];
+
+    // 遍历 data 数据
     for (const auto &voxel_pair : data_)
     {
       const OctVoxType &voxel = voxel_pair.second;
@@ -476,6 +502,7 @@ namespace LI2Sup
       {
         if (!voxel.getPoint(i, point))
           continue;
+        // 插入数据
         pcl_point[0] = static_cast<float>(point.x());
         pcl_point[1] = static_cast<float>(point.y());
         pcl_point[2] = static_cast<float>(point.z());
@@ -486,6 +513,7 @@ namespace LI2Sup
     }
   }
 
+  // 重置地图
   template <typename Point, typename Scalar>
   void OctVoxMap<Point, Scalar>::resetMap(const std::vector<float> &input)
   {
@@ -510,6 +538,7 @@ namespace LI2Sup
     reset_map_count_ = 10;
   }
 
+  // 保存地图
   template <typename Point, typename Scalar>
   void OctVoxMap<Point, Scalar>::saveMap() const
   {
@@ -562,6 +591,7 @@ namespace LI2Sup
     }
   }
 
+  // 清除相关数据
   template <typename Point, typename Scalar>
   void OctVoxMap<Point, Scalar>::clear()
   {
