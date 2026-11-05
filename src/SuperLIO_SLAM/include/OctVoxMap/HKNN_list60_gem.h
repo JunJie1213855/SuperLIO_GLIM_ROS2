@@ -14,7 +14,6 @@ static const std::array<float, 6> orders_min_dis2 = {
   0.062500, 0.125000, 0.250000, 0.312500, 0.375000, 100
 };
 
-
 alignas(16) static const std::array<Eigen::Vector3i, 60> HKNN_neighbor_voxel = 
 {
   Eigen::Vector3i(0, 0, 0), Eigen::Vector3i(0, -1, 0), Eigen::Vector3i(0, 0, -1), Eigen::Vector3i(-1, 0, 0), Eigen::Vector3i(-1, 0, -1), Eigen::Vector3i(0, -1, -1), 
@@ -29,10 +28,12 @@ alignas(16) static const std::array<Eigen::Vector3i, 60> HKNN_neighbor_voxel =
   Eigen::Vector3i(1, 1, -2), Eigen::Vector3i(1, -2, 1), Eigen::Vector3i(-2, -2, 0), Eigen::Vector3i(-2, -1, -2), Eigen::Vector3i(-2, -2, -1), Eigen::Vector3i(-1, -2, -2), 
   };
 
+// 每个近邻点群的起始索引
 static constexpr std::array<uint16_t, 7> flat_search_order_offsets = {{
   0, 43, 135, 219, 321, 465, 593,
 }};
 
+// 各个近邻点的预设群
 static constexpr std::array<uint8_t, 593> flat_search_order = {{
   // Group0
   0, 8, 0, 1, 2, 3, 4, 5, 6, 7, 
