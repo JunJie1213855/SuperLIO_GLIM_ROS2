@@ -205,4 +205,28 @@ python3 tools/glim2lio.py --dump "$OUT/merged_dump" --out "$OUT/merged_export" \
 
 得到 `$OUT/merged_export/merged.pcd` 后，将第 4 节的 `map_path` 换成该文件即可在合并地图中定位。初值应使用合并地图坐标。
 
+## 可选：jemalloc 内存分配器
+
+通过 CMake `if(SUPERLIO_USE_JEMALLOC)` 为 LIO、回环后端、重定位和独立 STD 节点直接链接 jemalloc。默认 `OFF`；安装开发库并重新编译即可启用：
+
+```bash
+sudo apt install libjemalloc-dev
+colcon build --packages-select super_lio_slam --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DSUPERLIO_USE_JEMALLOC=ON
+source install/setup.bash
+ros2 launch super_lio_slam vlp32.launch.py
+```
+
+无需额外 launch 参数或 `LD_PRELOAD`，RViz、launch 和 bag 播放进程不受该链接选项影响。启用但缺库时 CMake 明确报错；自定义库路径用 `-DJEMALLOC_LIBRARY=/absolute/path/libjemalloc.so`。
+
+可检查可执行文件的动态依赖：
+
+```bash
+readelf -d install/super_lio_slam/lib/super_lio_slam/super_lio_node | grep jemalloc
+```
+
+默认使用 jemalloc 自身配置。需要调节回收策略时，可在运行前设置 `export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:0"`。衰减参数控制空闲页回收时间；更积极的回收也可能增加 CPU 开销，见 [jemalloc 官方调优说明](https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md)。切回系统分配器需以 `-DSUPERLIO_USE_JEMALLOC=OFF` 重新编译。
+
+分配器不能释放仍被持有的关键帧、点云和位姿图。用同一数据集、相同参数和播放速度，分别运行关闭/开启 jemalloc 的构建，比对各算法进程峰值 RSS、退出前 RSS 和处理耗时，再判断收益。
+
 更多参数见 [包 README](../src/SuperLIO_SLAM/README.md)；理论见 [回环与 PGO](loop_pgo_path.md)、[重定位](relocation_math.md)。

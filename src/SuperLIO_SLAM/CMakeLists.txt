@@ -10,6 +10,20 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 编译期选择分配器：直接链接到算法可执行程序，不依赖 launch 或 LD_PRELOAD。
+option(WITH_JEMALLOC "Link algorithm executables with jemalloc" OFF)
+if(WITH_JEMALLOC)
+  find_library(JEMALLOC_LIBRARY NAMES jemalloc)
+  if(NOT JEMALLOC_LIBRARY OR NOT EXISTS "${JEMALLOC_LIBRARY}")
+    message(FATAL_ERROR
+      "WITH_JEMALLOC=ON requires jemalloc. Install libjemalloc-dev "
+      "or set -DJEMALLOC_LIBRARY=/absolute/path/libjemalloc.so")
+  endif()
+  message(STATUS "SuperLIO allocator: jemalloc (${JEMALLOC_LIBRARY})")
+else()
+  message(STATUS "SuperLIO allocator: system")
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(rosidl_default_runtime REQUIRED)
@@ -122,9 +136,9 @@ add_executable(relocation_node src/apps/relocation_node.cpp)
 target_link_libraries(relocation_node PRIVATE lio)
 
 add_executable(std_extract_node std/ros2/std_extract_node.cpp)
-ament_target_dependencies(std_extract_node
+ament_target_dependencies(std_extract_node PUBLIC
   rclcpp std_msgs sensor_msgs geometry_msgs visualization_msgs pcl_conversions)
-target_link_libraries(std_extract_node std_descriptor_core)
+target_link_libraries(std_extract_node PRIVATE std_descriptor_core)
 
 add_executable(loop_backend_node
   src/apps/loop_backend_node.cpp
@@ -137,12 +151,21 @@ target_include_directories(loop_backend_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/SC/cpp/module/Scancontext
   ${PCL_INCLUDE_DIRS}
 )
-ament_target_dependencies(loop_backend_node
+ament_target_dependencies(loop_backend_node PUBLIC
   rclcpp std_msgs std_srvs sensor_msgs geometry_msgs visualization_msgs nav_msgs
   pcl_conversions tf2_ros rosidl_default_runtime)
-target_link_libraries(loop_backend_node
+target_link_libraries(loop_backend_node PRIVATE
   submap_registration std_descriptor_core Eigen3::Eigen ${PCL_LIBRARIES} gtsam
   ${cpp_typesupport_target})
+
+if(WITH_JEMALLOC)
+  foreach(node_target IN ITEMS super_lio_node relocation_node loop_backend_node std_extract_node)
+    # 分配通常发生在间接依赖中，--as-needed 可能误删 jemalloc 的动态依赖。
+    # 只在该库周围关闭裁剪，并恢复之前的链接器状态；库由进程启动时自动加载。
+    target_link_libraries(${node_target} PRIVATE
+      "-Wl,--push-state,--no-as-needed" "${JEMALLOC_LIBRARY}" "-Wl,--pop-state")
+  endforeach()
+endif()
 
 install(TARGETS basic_core std_descriptor_core lio
   ARCHIVE DESTINATION lib

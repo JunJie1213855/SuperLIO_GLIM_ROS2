@@ -68,6 +68,7 @@ namespace super_lio_slam
     RelocationResult output;
     output.generation = task.generation;
     output.stamp = task.stamp;
+    // 查看局部地图、局部地图下当前点云和位姿以及参考地图是否为空
     if (!task.local_map || task.local_map->empty() ||
         !task.current_cloud || task.current_cloud->empty() ||
         !task.local_from_current.matrix().allFinite() ||
@@ -78,11 +79,16 @@ namespace super_lio_slam
     }
     // The source already lives in S. Do not re-anchor it at I_M or transform it
     // by the snapshot pose again; the solver must return W<-S.
+
+    // 局部坐标系地图 local map 降采样为 source 点云
     const auto source = sample(task.local_map, settings.voxel, settings.max_source);
+
     RegistrationCloud::Ptr current(new RegistrationCloud);
     // 当前扫描原在 I_M，先乘 T_S_IM，使独立的当前帧覆盖率检查也使用与源地图相同的 S 系。
     pcl::transformPointCloud(*task.current_cloud, *current, task.local_from_current.matrix().cast<float>().eval());
     current = sample(current, settings.voxel, settings.max_source);
+
+    // 设置先验的全局参考点云
     RegistrationCloud::ConstPtr target_input = task.reference;
     // 仅有先验时才按快照传感器的世界位置裁剪；无初始位姿时必须搜索完整参考地图。
     if (task.world_from_local_hint && crop_radius > 0)
@@ -96,6 +102,9 @@ namespace super_lio_slam
     }
     RegistrationCloud::Ptr target;
     RegistrationCloud::Ptr hinted_target;
+
+
+    // 有先验位姿，就把参考帧 target 转换为 hinted_target
     if (task.world_from_local_hint)
     {
       // Use one approximate frame for feature viewpoints and voxel grids. A remote
@@ -115,7 +124,7 @@ namespace super_lio_slam
     auto attempt = [&](const Eigen::Matrix4d *hint)
     {
       RegistrationResult result;
-      if (hint)
+      if (hint) // 有先验
       {
         const Eigen::Matrix4d identity = Eigen::Matrix4d::Identity();
         result = coarseRegister(source, hinted_target, settings, &identity);
@@ -123,13 +132,13 @@ namespace super_lio_slam
           // hinted_target 在近似 S 系：将其坐标系到 W 的先验左乘，恢复完整的 T_W_S。
           result.transform = (*hint * result.transform).eval();
       }
-      else
+      else     // 无先验，直接粗匹配
       {
         // teaser++ 粗配准
         result = coarseRegister(source, target, settings);
       }
 
-      // gicp 精配准
+      // 粗配准接受，开始 gicp 精配准
       if (result.accepted)
         result = refineRegister(source, target, current, settings, result);
       return result;

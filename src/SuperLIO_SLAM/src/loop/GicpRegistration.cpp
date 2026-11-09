@@ -96,7 +96,7 @@ namespace super_lio_slam
     };
     out.inliers = quality(aligned, out.mse);
     out.overlap = static_cast<double>(out.inliers) / aligned.size();
-    // 子图整体重合还不足以证明当前帧定位正确，另查当前扫描，防止只有旧帧“撑高”覆盖率。
+    // 子图整体重合还不足以证明当前帧定位正确，另查当前扫描，防止只有旧帧撑高覆盖率。
     // 调用方必须保证 current 与 source 已处于同一源坐标系。
     RegistrationCloud current_aligned;
     pcl::transformPointCloud(*current, current_aligned, out.transform.cast<float>().eval());

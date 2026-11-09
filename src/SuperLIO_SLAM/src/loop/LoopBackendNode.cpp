@@ -1380,6 +1380,7 @@ namespace super_lio_slam
     while (!stopping_)
     {
       MapSnapshot snapshot;
+      // 等待地图，发布地图
       {
         std::unique_lock<std::mutex> lock(map_mutex_);
         map_cv_.wait(lock, [this]

@@ -324,10 +324,12 @@ namespace LI2Sup
     task.stamp = measures_.lidar.end_time;
     task.frame_count = local_frame_count_;
     // 冻结同一时刻的地图、扫描和 T_S_IM，防止后台把新位姿误配给旧扫描。
-    task.local_from_current = Eigen::Isometry3d(kf_->GetSE3().matrix().cast<double>());
-    task.current_cloud.reset(new PointCloudType(*ds_undistort_));
+    task.local_from_current = Eigen::Isometry3d(kf_->GetSE3().matrix().cast<double>()); // 当前时刻的位姿
+    task.current_cloud.reset(new PointCloudType(*ds_undistort_));                       // 当前时刻的点云地图
     // The sensor callback owns local_ivox_. Freeze the whole retained S-frame
     // map here; the registration worker never reads a map being updated by LIO.
+
+    // 从当前局部坐标系下 voxelmap 中提取对应的局部坐标系点云地图
     std::vector<float> xyz;
     local_ivox_->getMap(xyz);
     CloudPtr local_map(new PointCloudType);
@@ -339,12 +341,16 @@ namespace LI2Sup
       point.intensity = 0; // OctVoxMap stores geometry only; FPFH/GICP use XYZ.
       local_map->push_back(point);
     }
-    task.local_map = local_map;
-    task.reference = reference_cloud_;
+
+    // 设置局部坐标系地图和参考帧
+    task.local_map = local_map;        // 局部坐标系地图
+    task.reference = reference_cloud_; // 参考帧地图
     task.local_gravity = kf_->GetGravity().cast<double>();
+
     // 先验给的是某帧 T_W_I，与对应 T_S_I 相消后得到整张局部地图的 T_W_S 提示。
-    if (have_prior_)
+    if (have_prior_) // 如果存在局部相对全局的先验位姿，使用先验
       task.world_from_local_hint = (prior_pose_ * prior_local_pose_.inverse()).matrix().cast<double>();
+    // 并行提交任务
     {
       std::lock_guard<std::mutex> lock(registration_mutex_);
       // 替换尚未运行的旧快照；正在求解的快照保持不变，前端继续累积地图和估计位姿。
@@ -623,9 +629,9 @@ namespace LI2Sup
         setStatus("LOCAL_TRACKING_DEGRADED");
       }
     }
-    else if (g_update_map && tracking_good_)  // 如果是全局坐标系建图，那就更新地图
+    else if (g_update_map && tracking_good_)  // 如果是全局坐标系建图且跟踪良好，那就更新地图
     {
-      SuperLIO::UpdateMap(); // 如果可以更新且跟踪良好，那就更新
+      SuperLIO::UpdateMap();
     }
     Output();
   }
