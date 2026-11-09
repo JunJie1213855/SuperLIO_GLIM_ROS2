@@ -43,6 +43,10 @@ sudo apt install ros-humble-rmw-cyclonedds-cpp
 停止旧的建图、播放器和 RViz。**每个终端执行第 0 节的环境命令后，再执行以下设置**，然后重新启动对应进程：
 
 ```bash
+export WS=/home/ros/rosws/SuperLIO_GLIM_ROS2
+source /opt/ros/humble/setup.bash
+source "$WS/install/setup.bash"
+
 export ROS_DOMAIN_ID=42
 export ROS_LOCALHOST_ONLY=1
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
