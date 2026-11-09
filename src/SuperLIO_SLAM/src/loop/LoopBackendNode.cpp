@@ -62,12 +62,18 @@ namespace super_lio_slam
 
     const auto registration_mode = declare_parameter<std::string>("loop_registration_mode", "std_teaser_gicp");
     const bool sc_registration = registration_mode == "sc_gicp" || registration_mode == "sc_teaser_gicp";
-    use_teaser_ = registration_mode == "std_teaser_gicp" || registration_mode == "sc_teaser_gicp";
-    if (!sc_registration && !use_teaser_ && registration_mode != "std_gicp")
+    const bool teaser_mode = registration_mode == "std_teaser_gicp" || registration_mode == "sc_teaser_gicp";
+    if (!sc_registration && !teaser_mode && registration_mode != "std_gicp")
       throw std::invalid_argument("loop_registration_mode must be std_gicp, std_teaser_gicp, sc_gicp or sc_teaser_gicp");
+    // 未指定新参数时兼容旧模式；显式开关只决定是否执行 FPFH/TEASER++ 粗配准。
+    rcl_interfaces::msg::ParameterDescriptor teaser_descriptor;
+    teaser_descriptor.read_only = true;
+    teaser_descriptor.description = "Enable loop FPFH/TEASER++ coarse registration; restart to compare";
+    use_teaser_ = declare_parameter<bool>("use_teaserpp", teaser_mode, teaser_descriptor);
+    use_submaps_ = teaser_mode || use_teaser_;
 #ifndef SUPERLIO_WITH_TEASER
     if (use_teaser_)
-      throw std::invalid_argument(registration_mode + " requires a build with SUPERLIO_WITH_TEASER=ON");
+      throw std::invalid_argument("use_teaserpp=true requires a build with SUPERLIO_WITH_TEASER=ON");
 #endif
     candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "std");
     if (candidate_mode_ != "distance" && candidate_mode_ != "std" && candidate_mode_ != "sc")
@@ -277,8 +283,11 @@ namespace super_lio_slam
       registration_thread_.join();
       throw;
     }
-    RCLCPP_INFO(get_logger(), "Loop backend ready: candidates=%s radius=%.1f m, %s + iSAM2, async registration queue=%zu",
-                candidate_mode_.c_str(), candidate_radius_m_, registration_mode.c_str(), registration_queue_capacity_);
+    RCLCPP_INFO(get_logger(), "Loop backend ready: candidates=%s radius=%.1f m, mode=%s use_teaserpp=%s "
+                "clouds=%s registration=%s + iSAM2, async registration queue=%zu",
+                candidate_mode_.c_str(), candidate_radius_m_, registration_mode.c_str(),
+                use_teaser_ ? "true" : "false", use_submaps_ ? "multi_frame_submaps" : "legacy_single_frame",
+                use_teaser_ ? "TEASER/GICP" : "GICP", registration_queue_capacity_);
   }
 
   gtsam::Pose3 LoopBackendNode::poseFromMsg(const geometry_msgs::msg::Pose &pose)
@@ -439,27 +448,12 @@ namespace super_lio_slam
     const auto target = target_window.cloud(settings.voxel, settings.max_target);
     const auto current = downsample(current_cloud, settings.voxel, settings.max_source);
 
-    // Teaser++ 粗配准
-    auto result = coarseRegister(source, target, settings, hint);
-
-    // 如果可以接受，就进行精配准，采用 GICP
-    if (result.accepted)
-      result = refineRegister(source, target, current, settings, result);
-    // 提示可能来自错误的重复结构；有提示的粗/精配准失败后，以相同验收标准无提示重试。
-    // Hints reduce repeated-structure ambiguity but never gate candidate admission.
-    // Retry without the hint if either registration stage rejects the hinted pairs.
-    if (!result.accepted && hint)
-    {
-      RCLCPP_DEBUG(get_logger(), "Submap %zu hinted registration %s; retry unguided stage=%s",
-                   historical_index, decisionText(false, "rejected").c_str(),
-                   decisionText(false, result.reason).c_str());
-      const double previous_ms = result.coarse_ms + result.fine_ms;
-      result = coarseRegister(source, target, settings);
-      if (result.accepted)
-        result = refineRegister(source, target, current, settings, result);
-      result.coarse_ms += previous_ms;
-    }
-    RCLCPP_INFO(get_logger(),
+    // 关闭粗配准时直接使用 T_H_C = T_W_H^-1 * T_W_C，不能误用其逆变换或单位阵。
+    const Eigen::Matrix4d odom_initial = (target_window.entries().back().odom_pose.inverse() *
+                                         source_window.entries().back().odom_pose).matrix();
+    const auto result = registerSubmaps(source, target, current, settings, use_teaser_, odom_initial, hint);
+    if (use_teaser_)
+      RCLCPP_INFO(get_logger(),
                 "Registration %zu -> %zu %s: coarse_inliers=%zu/%zu ratio=%.3f (min %.3f) "
                 "coarse_rmse=%s m (max %.3f) gicp=%s stage=%s",
                 historical_index, source_window.entries().back().index,
@@ -470,6 +464,13 @@ namespace super_lio_slam
                 result.coarse_inliers ? std::to_string(result.coarse_rmse).c_str() : "n/a",
                 settings.coarse_max_rmse, result.fine_ms > 0.0 ? "executed" : "skipped",
                 decisionText(result.accepted, result.reason).c_str());
+    else
+      RCLCPP_INFO(get_logger(),
+                  "Registration %zu -> %zu %s: use_teaserpp=false coarse=disabled initial=odom "
+                  "coarse_ms=%.1f fine_ms=%.1f stage=%s",
+                  historical_index, source_window.entries().back().index,
+                  decisionText(result.accepted, result.accepted ? "accepted" : "rejected").c_str(),
+                  result.coarse_ms, result.fine_ms, decisionText(result.accepted, result.reason).c_str());
     if (result.fine_ms > 0.0)
     {
       RCLCPP_INFO(get_logger(),
@@ -570,9 +571,9 @@ namespace super_lio_slam
                                                   static_cast<std::size_t>(loop_min_interval_);
     }
 
-    // 仅回环 TEASER++ 路径维护有限多帧窗口；不要与重定位的固定 S 系累积地图混淆。
+    // 多帧回环流程独立维护窗口，关闭粗配准仍使用同一窗口；不是重定位的固定 S 系累积地图。
     auto pending_window = source_window_;
-    if (use_teaser_)
+    if (use_submaps_)
     {
       try
       {
@@ -678,7 +679,7 @@ namespace super_lio_slam
             match.proposal.second = Eigen::AngleAxisd(sc_yaw - odom_yaw, Eigen::Vector3d::UnitZ()) * rotation;
             match.odom_hint = proposal.matrix();
           }
-          if (use_teaser_)
+          if (use_submaps_)
           {
             match.target_window = SubmapWindow(submap_limits_); // 添加目标子图
             const std::size_t first = h + 1 > static_cast<std::size_t>(submap_limits_.max_frames)
@@ -733,7 +734,7 @@ namespace super_lio_slam
                             .count();
         if (enough_time_since_loop && !descriptors.empty())
         {
-          if (use_teaser_)
+          if (use_submaps_)
           {
             // STD 在此只负责地点召回；时间/距离准入及 TEASER/GICP 验收通过后才形成回环边。
             const auto candidates = std_manager_.SearchCandidates(descriptors); // 查看候选
@@ -1079,10 +1080,11 @@ namespace super_lio_slam
     line.type = visualization_msgs::msg::Marker::LINE_LIST;
     line.action = visualization_msgs::msg::Marker::ADD;
     line.pose.orientation.w = 1.0;
-    line.scale.x = 0.15;
-    line.color.r = 0.0f;
-    line.color.g = 0.9f;
-    line.color.b = 0.3f;
+    // 回环边使用细红线，避免遮住绿色轨迹；LINE_LIST 的 scale.x 是线宽（米）。
+    line.scale.x = 0.02;
+    line.color.r = 1.0f;
+    line.color.g = 0.0f;
+    line.color.b = 0.0f;
     line.color.a = 1.0f;
     line.points.reserve(2 * loops_.size());
     for (const auto &[historical, current] : loops_)
@@ -1097,8 +1099,14 @@ namespace super_lio_slam
         line.points.push_back(point);
       }
     }
+    // 用同一对优化后端点绘制红球；固定 id 更新，PGO 后圆球随关键帧位姿一起移动。
+    auto endpoints = line;
+    endpoints.id = 1;
+    endpoints.type = visualization_msgs::msg::Marker::SPHERE_LIST;
+    endpoints.scale.x = endpoints.scale.y = endpoints.scale.z = 0.15; // 球直径（米）
     visualization_msgs::msg::MarkerArray markers;
     markers.markers.push_back(std::move(line));
+    markers.markers.push_back(std::move(endpoints));
     marker_pub_->publish(markers);
   }
 
@@ -1218,8 +1226,8 @@ namespace super_lio_slam
                         candidate.historical_index, task.index, candidate.proposal.first.norm());
           std::unique_ptr<RegistrationObservation> observation;
 
-          // 两条几何验证路径最终都返回 T_H_C：多帧 TEASER+GICP，或 STD 初值直接 GICP。
-          if (use_teaser_)
+          // 多帧流程可选择 TEASER+GICP 或里程计初值+GICP；旧单帧模式保持兼容。
+          if (use_submaps_)
           {
             Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
             hint.block<3, 3>(0, 0) = candidate.proposal.second;

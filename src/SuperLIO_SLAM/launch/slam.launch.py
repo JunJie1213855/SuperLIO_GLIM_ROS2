@@ -24,7 +24,7 @@ def _make_loop_backend(context):
     inherited = context.environment.get('LD_LIBRARY_PATH', '').split(os.pathsep)
     library_path = os.pathsep.join(dict.fromkeys(directory for directory in [*directories, *inherited] if directory))
     save_overrides = {}
-    for name, value_type in [('save_map_path', str), ('save_map_voxel_size', float),
+    for name, value_type in [('use_teaserpp', bool), ('save_map_path', str), ('save_map_voxel_size', float),
                              ('save_map_on_shutdown', bool)]:
         if LaunchConfiguration(name).perform(context):
             save_overrides[name] = ParameterValue(LaunchConfiguration(name), value_type=value_type)
@@ -70,6 +70,8 @@ def generate_launch_description():
         DeclareLaunchArgument('loop_registration_mode', default_value='std_teaser_gicp',
                               choices=['std_gicp', 'std_teaser_gicp', 'sc_gicp', 'sc_teaser_gicp'],
                               description='Loop registration algorithm (sc_* selects Scan Context candidates)'),
+        DeclareLaunchArgument('use_teaserpp', default_value='', choices=['', 'true', 'false'],
+                              description='Loop coarse registration; empty uses YAML or registration mode default'),
         DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('save_map_path', default_value='',
                               description='Optimized PCD output path; empty uses slam_config'),

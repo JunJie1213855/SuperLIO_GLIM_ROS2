@@ -323,13 +323,14 @@ namespace LI2Sup
     task.generation = generation_;
     task.stamp = measures_.lidar.end_time;
     task.frame_count = local_frame_count_;
+
     // 冻结同一时刻的地图、扫描和 T_S_IM，防止后台把新位姿误配给旧扫描。
     task.local_from_current = Eigen::Isometry3d(kf_->GetSE3().matrix().cast<double>()); // 当前时刻的位姿
     task.current_cloud.reset(new PointCloudType(*ds_undistort_));                       // 当前时刻的点云地图
     // The sensor callback owns local_ivox_. Freeze the whole retained S-frame
     // map here; the registration worker never reads a map being updated by LIO.
 
-    // 从当前局部坐标系下 voxelmap 中提取对应的局部坐标系点云地图
+    // 从当前局部坐标系下 voxelmap 中，提取对应的局部坐标系点云地图 local_map
     std::vector<float> xyz;
     local_ivox_->getMap(xyz);
     CloudPtr local_map(new PointCloudType);

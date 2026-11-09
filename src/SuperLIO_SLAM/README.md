@@ -30,7 +30,7 @@ source install/setup.bash
 
 构建助手按脚本位置定位工作区，在 `build/teaserpp_vendor` 缓存固定版本源码，安装到 `install/teaserpp`；
 完整缓存可使用 `--offline`。缺少 `teaserppConfig.cmake` 时先运行该助手。
-关闭 TEASER++ 的构建可使用 `std_gicp` 或 `sc_gicp`，不支持 TEASER++ 回环或当前重定位流程。
+关闭 TEASER++ 的构建可使用 `use_teaserpp:=false`（保留多帧窗口）或旧 `std_gicp` / `sc_gicp`，不支持 TEASER++ 回环或当前重定位流程。
 
 ## 启动与配置
 
@@ -67,6 +67,7 @@ ros2 bag play /mnt/d/dataset/SLAM/robosense/mapping
 | `enable_loop_backend` | 默认 true；false 同时关闭后端与关键帧发布 |
 | `loop_candidate_mode` | `std`（默认）、`sc`（Scan Context）或 `distance` |
 | `loop_registration_mode` | `std_teaser_gicp`（默认）、`std_gicp`、`sc_teaser_gicp` 或 `sc_gicp` |
+| `use_teaserpp` | 回环粗配准开关，`true` / `false`；未指定时沿用 YAML 或模式默认值；启动时读取，修改需重启 |
 | `loop_candidate_radius_m` | 各候选模式的原始里程计距离门限，默认 15 m |
 | `use_sim_time` | 默认 false；需要 ROS 仿真时间时仍可与播放器 `--clock` 配套使用 |
 | `rviz` / `rviz_config` | 是否启动及显示配置；关闭后端时自动选择 `lio.rviz` |
@@ -104,6 +105,28 @@ ros2 launch super_lio_slam unitree_slam.launch.py \
 SC 复用 `SC/cpp/module/Scancontext` 的 20 环 × 60 扇区高度描述子（半径 80 m）。在满足时间和空间门限的历史关键帧中，按 ring key 取最近的 `sc_candidate_count` 帧（默认 10），再保留 SC 距离小于 `sc_distance_threshold`（默认 0.13）的候选，按距离从小到大提交几何验证。参数位于 `config/loop/slam.yaml` 和 `config/loop/unitree_slam.yaml`。SC 提供历史帧 ← 当前帧的相对航向，平移及俯仰、横滚沿用里程计初值。日志 `SC ... matched` 表示通过候选筛选，闭环以几何验收和入图日志为准。
 
 STD 位姿提示是可选初值，提示失败后可重试无提示粗配准。源/目标子图分别在锚帧下按位姿累积，GICP 返回将当前帧点变换到历史帧的完整相对变换供 iSAM2 使用；坐标方向见[配准推导](../../docs/loop_pgo_path.md)。
+
+### 仅关闭 TEASER++ 的对比
+
+保持 `loop_registration_mode:=std_teaser_gicp`（或 `sc_teaser_gicp`），只改变 `use_teaserpp`：
+
+```bash
+# 开启：多帧 FPFH / TEASER++ -> GICP -> 相同质量检查 -> iSAM2
+ros2 launch super_lio_slam vlp32.launch.py use_teaserpp:=true rviz:=true
+# 关闭：同一多帧子图，LIO 相对位姿初值 -> GICP -> 相同质量检查 -> iSAM2
+ros2 launch super_lio_slam vlp32.launch.py use_teaserpp:=false rviz:=true
+
+# 独立后端（需另启 LIO 并打开关键帧发布）
+ros2 launch super_lio_slam loop_backend.launch.py use_teaserpp:=false
+# tmux 建图脚本：默认 true，可直接修改脚本开头的 USE_TEASERPP
+USE_TEASERPP=false ./scripts/start_mapping.sh slam
+```
+
+也可在 `slam_config` 的 `loop_backend_node.ros__parameters` 下设置 `use_teaserpp: false`。显式 launch 参数优先；tmux 脚本会显式传递 `USE_TEASERPP`，不读取 YAML 中的同名开关。该参数只读，不支持运行中热切换。
+
+关闭时不提取 FPFH、不运行 TEASER++，不执行粗配准内点/RMSE 门限。以 `T_H_C = T_W_H^-1 * T_W_C` 初始化 GICP，不使用描述子提示覆盖里程计初值。时间/距离候选筛选、源/目标窗口、降采样、GICP、当前帧覆盖率、MSE、几何退化、细化修正及 PGO 门限均保持。重定位的全局粗配准不受此开关影响。
+
+旧 `std_gicp` / `sc_gicp` 在未显式开启开关时仍使用单帧对历史局部子图，不作为仅移除 TEASER++ 的严格对照。显式 `use_teaserpp=true` 则启用多帧粗/精配准。启动日志显示实际 `use_teaserpp` 和 `clouds`；关闭时配准日志显示 `coarse=disabled initial=odom` 及粗/精耗时。每组重启节点，从同一 bag 起点、相同播放速率开始，比较接受回环数、配准耗时和最终地图。
 
 ### 配准门限
 

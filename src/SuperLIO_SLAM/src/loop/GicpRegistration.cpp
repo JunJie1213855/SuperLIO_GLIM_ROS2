@@ -11,6 +11,37 @@
 
 namespace super_lio_slam
 {
+  RegistrationResult registerSubmaps(const RegistrationCloud::ConstPtr &source,
+                                    const RegistrationCloud::ConstPtr &target,
+                                    const RegistrationCloud::ConstPtr &current,
+                                    const RegistrationSettings &settings,
+                                    bool use_teaserpp,
+                                    const Eigen::Matrix4d &initial,
+                                    const Eigen::Matrix4d *pose_hint)
+  {
+    if (!use_teaserpp)
+    {
+      RegistrationResult seed;
+      seed.accepted = true; // 仅允许进入 GICP，不代表接受回环；最终仍检查全部精配准门限。
+      seed.transform = initial;
+      return refineRegister(source, target, current, settings, seed);
+    }
+
+    auto result = coarseRegister(source, target, settings, pose_hint);
+    if (result.accepted)
+      result = refineRegister(source, target, current, settings, result);
+    // 保留原流程：描述子提示失败后可无提示重试，但仍执行相同的质量验收。
+    if (!result.accepted && pose_hint)
+    {
+      const double previous_ms = result.coarse_ms + result.fine_ms;
+      result = coarseRegister(source, target, settings);
+      if (result.accepted)
+        result = refineRegister(source, target, current, settings, result);
+      result.coarse_ms += previous_ms;
+    }
+    return result;
+  }
+
   namespace
   {
     class InspectableGicp : public pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI>
@@ -46,7 +77,7 @@ namespace super_lio_slam
         std::min(source->size(), target->size()) <= static_cast<std::size_t>(s.covariance_neighbors))
       return finish("few_gicp_points");
 
-    // 粗配准作为初始值
+    // 初值可以来自 TEASER++ 或连续 LIO 的相对位姿。
     const Eigen::Matrix4d coarse = out.transform;
 
     // gicp 精配准

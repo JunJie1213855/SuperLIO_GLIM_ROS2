@@ -131,6 +131,8 @@ namespace super_lio_slam
         const SubmapWindow &source, const SubmapWindow &target, const CloudPtr &current_cloud,
         std::size_t historical_index, const Eigen::Matrix4d *hint) const;
     bool use_teaser_ = false;
+    // 多帧数据组织与粗配准开关分开，关闭 TEASER++ 不改变当前多帧对比条件。
+    bool use_submaps_ = false;
     std::string candidate_mode_;
     double candidate_radius_m_ = 15.0;
     SubmapLimits submap_limits_;

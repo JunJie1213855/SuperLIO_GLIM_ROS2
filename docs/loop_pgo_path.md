@@ -43,6 +43,8 @@ GICP 精配准 → 覆盖率、MSE、修正幅度、退化验收
 - std_teaser_gicp / sc_teaser_gicp：当前和历史多帧子图，FPFH / TEASER++ 粗配准，再 GICP。
 - std_gicp / sc_gicp：单个当前帧对历史局部子图直接执行 GICP，可尝试描述子提供的初值和里程计初值。
 
+新增启动参数 `use_teaserpp`，可在多帧模式下单独关闭粗配准。`std_teaser_gicp / sc_teaser_gicp + use_teaserpp=false` 保留原候选检索、多帧窗口和 GICP 验收，只将初值换成连续 LIO 相对位姿。未指定该参数时兼容原模式默认值；显式开启会采用多帧粗/精配准。该开关只作用于在线回环，修改需重启。
+
 `sc_*` 模式名直接选择 SC 候选。`std_*` 保留原有接口，候选检索方式由 `loop_candidate_mode` 选择。
 
 ## 2. 坐标系与变量
@@ -383,6 +385,10 @@ $$
 
 ## 9. TEASER++ 粗配准
 
+本节仅在回环 `use_teaserpp=true` 时执行。关闭时跳过 FPFH 与 TEASER++，直接以
+\(T_{H\leftarrow C}^{\mathrm{init}}=(T_{W\leftarrow H}^{\mathrm{LIO}})^{-1}T_{W\leftarrow C}^{\mathrm{LIO}}\)
+进入相同 GICP 流程；质量检查中的细化修正量改为相对于该里程计初值计算，而非相对于 TEASER++ 解。
+
 ### 9.1 固定尺度的刚体模型
 
 对应点：
@@ -662,6 +668,8 @@ $$
 比例过小则拒绝。它是归一化的几何退化诊断，不是经过标定的位姿信息矩阵，不能直接当成图因子协方差的逆。
 
 ## 13. 直接 GICP 对照路径
+
+严格对比粗配准是否有益时，建议保持多帧模式并切换 `use_teaserpp`，这样两组的子图组成、点数上限和候选验证一致。下面描述的是保留兼容的旧单帧路径，而非新增的多帧无粗配准路径。
 
 std_gicp 使用单帧当前点云，而不是两侧都使用上述因果多帧窗口。
 

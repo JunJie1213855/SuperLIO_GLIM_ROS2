@@ -3,11 +3,15 @@
 已完成构建后使用。以下以 VLP32 / UrbanNav 为例；更换传感器时同步修改启动入口、传感器 YAML 和数据路径。基础建图是在线 LIO 位姿估计与建图；已有地图定位使用第 4 节的重定位入口。
 
 ## 0. 环境与传感器
+如果你运行 velodyne 数据集汇报无 time 字段，采用如下无视
+```bash
+export SUPERLIO_WARN_MISSING_TIME=0
+```
 
 每个终端先执行：
 
 ```bash
-export WS=/home/ros/rosws/SuperLIO_GLIM_ROS2
+export WS=$(pwd)
 export OUT="$WS/maps"
 export BAG=/home/ros/dataset/urbannav/2020-03-14-16-45-35
 cd "$WS"
@@ -43,7 +47,7 @@ sudo apt install ros-humble-rmw-cyclonedds-cpp
 停止旧的建图、播放器和 RViz。**每个终端执行第 0 节的环境命令后，再执行以下设置**，然后重新启动对应进程：
 
 ```bash
-export WS=/home/ros/rosws/SuperLIO_GLIM_ROS2
+export WS=$(pwd)
 source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 
@@ -104,6 +108,16 @@ ros2 launch super_lio_slam vlp32.launch.py loop_candidate_mode:=distance rviz:=t
 ```
 
 三种方法默认均要求候选时间差 **>30 s**、原始里程计距离 **≤15 m**，并接受配准质量检查。距离半径可用 `loop_candidate_radius_m:=15.0` 覆盖。
+
+仅移除粗配准作对比，保持默认多帧模式，只切换 `use_teaserpp`：
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py use_teaserpp:=false rviz:=true
+# 对照组：use_teaserpp:=true；每次重启节点并从同一 bag 起点回放。
+# tmux 脚本：USE_TEASERPP=false ./scripts/start_mapping.sh slam
+```
+
+关闭后使用 LIO 相对位姿初值直接做 GICP，保留相同多帧子图和精配准验收门限；重定位不受影响。参数只读，修改需重启。
 
 ## 3. 保存地图
 
