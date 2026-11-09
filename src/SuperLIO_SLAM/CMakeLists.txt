@@ -130,9 +130,11 @@ add_executable(loop_backend_node
   src/apps/loop_backend_node.cpp
   src/loop/LoopBackendNode.cpp
   src/loop/OptimizedMapWriter.cpp
+  SC/cpp/module/Scancontext/Scancontext.cpp
 )
 target_include_directories(loop_backend_node PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/SC/cpp/module/Scancontext
   ${PCL_INCLUDE_DIRS}
 )
 ament_target_dependencies(loop_backend_node

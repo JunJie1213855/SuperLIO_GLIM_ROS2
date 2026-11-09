@@ -30,7 +30,7 @@ source install/setup.bash
 
 构建助手按脚本位置定位工作区，在 `build/teaserpp_vendor` 缓存固定版本源码，安装到 `install/teaserpp`；
 完整缓存可使用 `--offline`。缺少 `teaserppConfig.cmake` 时先运行该助手。
-关闭 TEASER++ 的构建只能使用 `std_gicp`，不支持 TEASER++ 回环或当前重定位流程。
+关闭 TEASER++ 的构建可使用 `std_gicp` 或 `sc_gicp`，不支持 TEASER++ 回环或当前重定位流程。
 
 ## 启动与配置
 
@@ -65,21 +65,27 @@ ros2 bag play /mnt/d/dataset/SLAM/robosense/mapping
 | `slam_config` | 关键帧、STD、图优化与地图发布；Unitree 使用 `unitree_slam.yaml` |
 | `registration_config` | TEASER++、GICP 和接受门限；可覆盖入口默认配置 |
 | `enable_loop_backend` | 默认 true；false 同时关闭后端与关键帧发布 |
-| `loop_candidate_mode` | `std`（默认）或 `distance` |
-| `loop_registration_mode` | `std_teaser_gicp`（默认）或 `std_gicp` |
-| `loop_candidate_radius_m` | 两种候选模式的原始里程计距离门限，默认 15 m |
+| `loop_candidate_mode` | `std`（默认）、`sc`（Scan Context）或 `distance` |
+| `loop_registration_mode` | `std_teaser_gicp`（默认）、`std_gicp`、`sc_teaser_gicp` 或 `sc_gicp` |
+| `loop_candidate_radius_m` | 各候选模式的原始里程计距离门限，默认 15 m |
 | `use_sim_time` | 默认 false；需要 ROS 仿真时间时仍可与播放器 `--clock` 配套使用 |
 | `rviz` / `rviz_config` | 是否启动及显示配置；关闭后端时自动选择 `lio.rviz` |
 | `save_map_path` | 服务与退出保存的优化地图 PCD 路径 |
 | `save_map_voxel_size` | 保存体素大小，默认 0.2 m；0 逐点流式写入 |
 | `save_map_on_shutdown` | 正常退出自动保存；默认 false |
 
-### 四种回环组合
+### 回环候选与配准组合
 
 ```bash
 # STD + TEASER++ + GICP（默认）
 ros2 launch super_lio_slam unitree_slam.launch.py \
   loop_candidate_mode:=std loop_registration_mode:=std_teaser_gicp rviz:=true
+# Scan Context + TEASER++ + GICP
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_registration_mode:=sc_teaser_gicp rviz:=true
+# Scan Context + 直接 GICP
+ros2 launch super_lio_slam unitree_slam.launch.py \
+  loop_registration_mode:=sc_gicp rviz:=true
 # 距离检索 + TEASER++ + GICP
 ros2 launch super_lio_slam unitree_slam.launch.py \
   loop_candidate_mode:=distance loop_registration_mode:=std_teaser_gicp rviz:=true
@@ -91,9 +97,11 @@ ros2 launch super_lio_slam unitree_slam.launch.py \
   loop_candidate_mode:=distance loop_registration_mode:=std_gicp rviz:=true
 ```
 
-候选方式与配准方式独立。`loop_distance_teaser_gicp.yaml` 只是显式选择的实验配置，不会自动启用距离检索。
-两种检索均要求传感器时间差 **>30 s**、原始里程计距离 **≤15 m**；
+`sc_teaser_gicp` 和 `sc_gicp` 自动选择 SC 候选，优先于 `loop_candidate_mode`。原有 `std_*` 模式继续按 `loop_candidate_mode` 选择候选。`loop_distance_teaser_gicp.yaml` 只是显式选择的实验配置，不会自动启用距离检索。
+三种检索均要求传感器时间差 **>30 s**、原始里程计距离 **≤15 m**；
 还受关键帧冷却及源/目标子图不共享成员的限制。
+
+SC 复用 `SC/cpp/module/Scancontext` 的 20 环 × 60 扇区高度描述子（半径 80 m）。在满足时间和空间门限的历史关键帧中，按 ring key 取最近的 `sc_candidate_count` 帧（默认 10），再保留 SC 距离小于 `sc_distance_threshold`（默认 0.13）的候选，按距离从小到大提交几何验证。参数位于 `config/loop/slam.yaml` 和 `config/loop/unitree_slam.yaml`。SC 提供历史帧 ← 当前帧的相对航向，平移及俯仰、横滚沿用里程计初值。日志 `SC ... matched` 表示通过候选筛选，闭环以几何验收和入图日志为准。
 
 STD 位姿提示是可选初值，提示失败后可重试无提示粗配准。源/目标子图分别在锚帧下按位姿累积，GICP 返回将当前帧点变换到历史帧的完整相对变换供 iSAM2 使用；坐标方向见[配准推导](../../docs/loop_pgo_path.md)。
 

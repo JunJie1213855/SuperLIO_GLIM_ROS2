@@ -2,12 +2,12 @@
 
 ROS 2 LiDAR / IMU 建图定位、在线回环、参考地图重定位与 GLIM 多会话地图合并。
 
-**运行命令见 [Quickstart](docs/quickstart.md)**：基础建图 → STD / 距离回环 → 保存地图 → 重定位 → 多会话合并。
+**运行命令见 [Quickstart](docs/quickstart.md)**：基础建图 → STD / SC / 距离回环 → 保存地图 → 重定位 → 多会话合并。
 
 | 功能 | 当前流程 |
 |---|---|
 | 基础建图定位 | SuperLIO 前端 LIO，输出连续位姿与点云 |
-| 在线回环 | STD（默认）或距离检索 → 多帧 TEASER++ → GICP → iSAM2 |
+| 在线回环 | STD（默认）、Scan Context 或距离检索 → 多帧 TEASER++ → GICP → iSAM2 |
 | 保存地图 | 服务保存完整优化关键帧地图，可配置退出自动保存，无需录制 rosbag |
 | 重定位 | S 系累积局部地图快照 → TEASER++ / GICP → 状态与协方差变换 → 参考地图跟踪 |
 | 地图合并 | 导出各会话关键帧 → GLIM dump → Offline Viewer 配准优化 → merged.pcd |

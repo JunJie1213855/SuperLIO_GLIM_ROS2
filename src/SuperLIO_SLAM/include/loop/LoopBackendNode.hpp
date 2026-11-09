@@ -130,7 +130,7 @@ namespace super_lio_slam
     std::unique_ptr<RegistrationObservation> verifySubmaps(
         const SubmapWindow &source, const SubmapWindow &target, const CloudPtr &current_cloud,
         std::size_t historical_index, const Eigen::Matrix4d *hint) const;
-    std::string registration_mode_;
+    bool use_teaser_ = false;
     std::string candidate_mode_;
     double candidate_radius_m_ = 15.0;
     SubmapLimits submap_limits_;
@@ -139,6 +139,15 @@ namespace super_lio_slam
     int registration_top_k_ = 3;
     double registration_budget_ms_ = 500.0;
     STDescManager std_manager_;
+    struct ScanContextDescriptor
+    {
+      Eigen::MatrixXd context;
+      Eigen::MatrixXd ring_key;
+    };
+    // Indexed by backend frame index. Only the keyframe callback uses this history.
+    std::vector<ScanContextDescriptor> sc_history_;
+    int sc_candidate_count_ = 10;
+    double sc_distance_threshold_ = 0.13;
     std::vector<Frame> frames_;
     std::vector<std::pair<std::size_t, std::size_t>> loops_;
     gtsam::ISAM2 isam_;

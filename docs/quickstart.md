@@ -86,17 +86,20 @@ ros2 bag play "$BAG" --topics /velodyne_points /imu/data --rate 0.5
 
 ## 2. 建图定位 + 回环
 
-以下二选一，终端 B 仍按第 1 节播放数据。
+以下三选一，终端 B 仍按第 1 节播放数据。
 
 ```bash
 # 默认：STD → 多帧 TEASER++ → GICP → iSAM2
 ros2 launch super_lio_slam vlp32.launch.py rviz:=true
 
+# Scan Context → 多帧 TEASER++ → GICP → iSAM2
+ros2 launch super_lio_slam vlp32.launch.py loop_registration_mode:=sc_teaser_gicp rviz:=true
+
 # 距离检索 → 多帧 TEASER++ → GICP → iSAM2
 ros2 launch super_lio_slam vlp32.launch.py loop_candidate_mode:=distance rviz:=true
 ```
 
-两种方法默认均要求候选时间差 **>30 s**、原始里程计距离 **≤15 m**，并接受配准质量检查。距离半径可用 `loop_candidate_radius_m:=15.0` 覆盖。
+三种方法默认均要求候选时间差 **>30 s**、原始里程计距离 **≤15 m**，并接受配准质量检查。距离半径可用 `loop_candidate_radius_m:=15.0` 覆盖。
 
 ## 3. 保存地图
 

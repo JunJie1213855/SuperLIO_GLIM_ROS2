@@ -60,8 +60,8 @@ def main():
     parser.add_argument('--pcd', help='Optional binary PCD scene')
     parser.add_argument('--moving', action='store_true', help='Use nonzero true translation and rotation')
     parser.add_argument('--reject-registration', action='store_true', help='Force the registration minimum-point gate to reject candidates')
-    parser.add_argument('--mode', choices=['std_gicp', 'std_teaser_gicp'], default='std_gicp')
-    parser.add_argument('--candidate-mode', choices=['std','distance'], default='std')
+    parser.add_argument('--mode', choices=['std_gicp', 'std_teaser_gicp', 'sc_gicp', 'sc_teaser_gicp'], default='std_gicp')
+    parser.add_argument('--candidate-mode', choices=['std', 'sc', 'distance'], default='std')
     parser.add_argument('--candidate-radius', type=float, default=15.0)
     parser.add_argument('--reject-distance', action='store_true')
     parser.add_argument('--submap-frames', type=int, default=4, help='New-mode causal window size')
@@ -90,6 +90,12 @@ def main():
                '-p', f'coarse_min_inlier_ratio:={args.coarse_inlier_ratio}',
                '-p', f'coarse_max_inlier_rmse_m:={args.coarse_max_rmse}',
                '-p', f'loop_min_time_separation_s:={args.loop_min_time_separation}']
+    if args.mode.startswith('sc_'):
+        args.candidate_mode = 'sc'
+    use_teaser = args.mode.endswith('_teaser_gicp')
+    if args.candidate_mode == 'sc':
+        # Let one synthetic loop constrain yaw strongly enough to observe its sign in PGO.
+        command += ['-p', 'graph_loop_rotation_sigma:=0.01']
     if args.reject_registration:
         command += ['-p', 'registration_min_points:=100000']
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
@@ -163,7 +169,7 @@ def main():
         if args.candidate_mode=='std':
             assert 0 < len(edges.points) <= 600 and len(edges.points) % 6 == 0
         else:
-            assert not edges.points and edges.action==Marker.DELETE, 'Distance mode generated STD geometry'
+            assert not edges.points and edges.action==Marker.DELETE, 'Non-STD mode generated STD geometry'
         assert len(vertices.points) * 2 == len(edges.points)
         # Wait for delayed loop corrections and their asynchronous map snapshot.
         deadline = time.monotonic() + (0.5 if expect_rejection else 15)
@@ -238,15 +244,21 @@ def main():
             assert 'matched:' not in diagnostic_log and 'accepted:' not in diagnostic_log and 'Distance candidate ' not in diagnostic_log, 'Candidate passed rejection gate'
         elif args.candidate_mode=='distance':
             assert 'Distance candidate ' in diagnostic_log and 'STD ' not in diagnostic_log, 'Distance retrieval was not exercised'
+        elif args.candidate_mode == 'sc':
+            assert re.search(r'SC \d+ -> \d+ matched: sc_distance=', diagnostic_log), 'Missing SC match'
+            assert not re.search(r'STD \d+ -> \d+ matched:', diagnostic_log), 'SC mode ran STD matching'
+            if args.moving:
+                yaw_hints = re.findall(r'SC 0 -> [34] matched:.*?yaw=([\d.]+) deg', diagnostic_log)
+                assert any(abs(float(hint) - 90.0) <= 6.0 for hint in yaw_hints), 'Incorrect SC yaw hint direction'
         else:
             assert 'STD ' in diagnostic_log and 'matched:' in diagnostic_log, 'Missing verified STD match'
         if args.reject_registration:
-            assert ('stage=few_points' in diagnostic_log if args.mode == 'std_teaser_gicp'
+            assert ('stage=few_points' in diagnostic_log if use_teaser
                     else 'stage=few_gicp_points' in diagnostic_log), 'Missing registration gate diagnostic'
-        if args.mode == 'std_teaser_gicp' and not expect_rejection:
+        if use_teaser and not expect_rejection:
             assert 'TEASER/GICP' in diagnostic_log, 'New registration mode was not exercised'
             assert 'coarse_rmse=' in diagnostic_log and 'gicp=executed' in diagnostic_log, 'Missing registration quality summary'
-        elif args.mode == 'std_gicp' and not expect_rejection:
+        elif not expect_rejection:
             assert 'accepted: GICP' in diagnostic_log, 'Direct GICP was not exercised'
             assert 'stage=accepted' in diagnostic_log, 'Missing direct GICP quality decision'
         print(f'Backend log: {log.name}')

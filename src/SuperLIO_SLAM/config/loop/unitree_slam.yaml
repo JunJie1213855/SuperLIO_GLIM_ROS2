@@ -44,7 +44,9 @@ loop_backend_node:
     loop_min_interval: 20
     loop_candidate_mode: std
     loop_registration_mode: std_teaser_gicp
-    loop_candidate_radius_m: 15.0  # spatial gate for STD and distance retrieval
+    loop_candidate_radius_m: 15.0  # spatial gate for all candidate modes
+    sc_candidate_count: 10  # eligible ring-key neighbors to compare
+    sc_distance_threshold: 0.13  # strict upper bound on Scan Context distance
     loop_min_time_separation_s: 30.0  # candidate stamp gap must be strictly greater
     loop_diagnostic_stride: 1  # 0 disables per-keyframe STD summaries
     graph_prior_translation_sigma: 0.001

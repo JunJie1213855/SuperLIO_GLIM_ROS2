@@ -1,5 +1,6 @@
 #include "loop/LoopBackendNode.hpp"
 #include "loop/OptimizedMapWriter.hpp"
+#include "Scancontext.h"
 
 #include <algorithm>
 #include <chrono>
@@ -59,19 +60,24 @@ namespace super_lio_slam
     std_manager_.current_frame_id_ = 0;
     read_parameters(*this, std_manager_.config_setting_);
 
-    // 闭环检测候选方法选择：std 和 distance
-    candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "std");
-    // 两个选项，两个都不是直接丢异常
-    if (candidate_mode_ != "distance" && candidate_mode_ != "std")
-      throw std::invalid_argument("loop_candidate_mode must be distance or std");
-    // 闭环整体方法，默认为 std + teaserpp + gicp 方法
-    registration_mode_ = declare_parameter<std::string>("loop_registration_mode", "std_teaser_gicp");
-    if (registration_mode_ != "std_gicp" && registration_mode_ != "std_teaser_gicp")
-      throw std::invalid_argument("loop_registration_mode must be std_gicp or std_teaser_gicp");
+    const auto registration_mode = declare_parameter<std::string>("loop_registration_mode", "std_teaser_gicp");
+    const bool sc_registration = registration_mode == "sc_gicp" || registration_mode == "sc_teaser_gicp";
+    use_teaser_ = registration_mode == "std_teaser_gicp" || registration_mode == "sc_teaser_gicp";
+    if (!sc_registration && !use_teaser_ && registration_mode != "std_gicp")
+      throw std::invalid_argument("loop_registration_mode must be std_gicp, std_teaser_gicp, sc_gicp or sc_teaser_gicp");
 #ifndef SUPERLIO_WITH_TEASER
-    if (registration_mode_ == "std_teaser_gicp")
-      throw std::invalid_argument("std_teaser_gicp requires a build with SUPERLIO_WITH_TEASER=ON");
+    if (use_teaser_)
+      throw std::invalid_argument(registration_mode + " requires a build with SUPERLIO_WITH_TEASER=ON");
 #endif
+    candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "std");
+    if (candidate_mode_ != "distance" && candidate_mode_ != "std" && candidate_mode_ != "sc")
+      throw std::invalid_argument("loop_candidate_mode must be std, sc or distance");
+    if (sc_registration && candidate_mode_ != "sc")
+    {
+      // SC mode names select the descriptor even when launch supplies its default candidate mode.
+      set_parameter(rclcpp::Parameter("loop_candidate_mode", "sc"));
+      candidate_mode_ = "sc";
+    }
 
     // 辅助函数：返回大于 0 的值
     auto positive = [this](const char *name, double value)
@@ -92,6 +98,10 @@ namespace super_lio_slam
 
     // 基础参数设置
     candidate_radius_m_ = positive("loop_candidate_radius_m", 15.0);
+    sc_candidate_count_ = bounded("sc_candidate_count", 10, 1, 100);
+    sc_distance_threshold_ = positive("sc_distance_threshold", 0.13);
+    if (sc_distance_threshold_ > 2.0)
+      throw std::invalid_argument("sc_distance_threshold must be <= 2");
     submap_limits_.max_frames = bounded("registration_submap_max_keyframes", 4, 1, 20);
     submap_limits_.max_duration = positive("registration_submap_max_duration_s", 6.0);
     submap_limits_.max_travel = positive("registration_submap_max_travel_distance_m", 6.0);
@@ -268,7 +278,7 @@ namespace super_lio_slam
       throw;
     }
     RCLCPP_INFO(get_logger(), "Loop backend ready: candidates=%s radius=%.1f m, %s + iSAM2, async registration queue=%zu",
-                candidate_mode_.c_str(), candidate_radius_m_, registration_mode_.c_str(), registration_queue_capacity_);
+                candidate_mode_.c_str(), candidate_radius_m_, registration_mode.c_str(), registration_queue_capacity_);
   }
 
   gtsam::Pose3 LoopBackendNode::poseFromMsg(const geometry_msgs::msg::Pose &pose)
@@ -560,9 +570,9 @@ namespace super_lio_slam
                                                   static_cast<std::size_t>(loop_min_interval_);
     }
 
-    // 仅回环 std_teaser_gicp 维护有限多帧窗口；不要与重定位的固定 S 系累积地图混淆。
+    // 仅回环 TEASER++ 路径维护有限多帧窗口；不要与重定位的固定 S 系累积地图混淆。
     auto pending_window = source_window_;
-    if (registration_mode_ == "std_teaser_gicp")
+    if (use_teaser_)
     {
       try
       {
@@ -590,24 +600,66 @@ namespace super_lio_slam
     double descriptor_ms = 0.0;
     const auto std_begin = std::chrono::steady_clock::now();
     // candidate_mode 只决定“找谁”；registration_mode 决定“如何验证”，二者独立配置。
-    if (candidate_mode_ == "distance") // 采用距离决定候选帧
+    if (candidate_mode_ != "std")
     {
-      if (enough_time_since_loop)
+      const bool use_sc = candidate_mode_ == "sc";
+      SCManager sc;
+      ScanContextDescriptor current_sc;
+      if (use_sc)
       {
-        // Rank in the continuous raw odometry frame; never mix optimized and raw poses.
-        std::vector<std::pair<double, std::size_t>> nearest;
-        std::lock_guard<std::mutex> lock(graph_mutex_);
-        for (std::size_t h = 0; h < index; ++h)
+        current_sc.context = sc.makeScancontext(*cloud);
+        current_sc.ring_key = sc.makeRingkeyFromScancontext(current_sc.context);
+        descriptor_ms = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - std_begin).count();
+      }
+      if (enough_time_since_loop && (!use_sc || current_sc.context.squaredNorm() > 0.0))
+      {
+        struct RankedCandidate
         {
-          if (!loopCandidateEligible(msg->header.stamp, raw_pose, h)) // 检测是否在两帧的时间是否过短
-            continue;
-          const double distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
-          if (distance <= candidate_radius_m_) // 检测两帧距离满足阈值
-            nearest.emplace_back(distance, h);
+          double score;
+          std::size_t historical;
+          double sc_yaw = 0.0;
+        };
+        const auto rank_by_score = [](const RankedCandidate &a, const RankedCandidate &b)
+        {
+          return std::pair{a.score, a.historical} < std::pair{b.score, b.historical};
+        };
+        std::vector<RankedCandidate> nearest;
+        {
+          std::lock_guard<std::mutex> lock(graph_mutex_);
+          for (std::size_t h = 0; h < index; ++h)
+          {
+            if (!loopCandidateEligible(msg->header.stamp, raw_pose, h))
+              continue;
+            if (use_sc && sc_history_[h].context.squaredNorm() == 0.0)
+              continue;
+            const double score = use_sc
+                ? (sc_history_[h].ring_key - current_sc.ring_key).squaredNorm()
+                : (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
+            nearest.push_back({score, h});
+          }
         }
-        std::sort(nearest.begin(), nearest.end()); // 从最小的开始配准
+        if (use_sc)
+        {
+          // Shortlist only eligible frames by ring key, then compare their polar contexts.
+          const auto count = std::min(nearest.size(), static_cast<std::size_t>(sc_candidate_count_));
+          std::partial_sort(nearest.begin(), nearest.begin() + count, nearest.end(), rank_by_score);
+          nearest.resize(count);
+          for (auto &candidate : nearest)
+          {
+            // The library shifts its second argument into the first, yielding H <- C.
+            const auto [distance, shift] = sc.distanceBtnScanContext(
+                sc_history_[candidate.historical].context, current_sc.context);
+            candidate.score = distance;
+            candidate.sc_yaw = shift * (2.0 * std::acos(-1.0) / sc.PC_NUM_SECTOR);
+          }
+          std::erase_if(nearest, [this](const RankedCandidate &candidate)
+                        { return !std::isfinite(candidate.score) || candidate.score >= sc_distance_threshold_; });
+        }
+        std::sort(nearest.begin(), nearest.end(), rank_by_score);
+        std::lock_guard<std::mutex> lock(graph_mutex_);
         std::vector<std::size_t> selected;
-        for (const auto &[distance, h] : nearest)
+        for (const auto &[score, h, sc_yaw] : nearest)
         {
           if (selected.size() >= static_cast<std::size_t>(registration_top_k_)) // 有足够多的帧就跳出循环
             break;
@@ -619,7 +671,14 @@ namespace super_lio_slam
           const auto proposal = frames_[h].odom_pose.between(raw_pose);
           match.proposal = {proposal.translation(), proposal.rotation().matrix()};
           match.have_pose_hint = true;
-          if (registration_mode_ == "std_teaser_gicp")
+          if (use_sc)
+          {
+            const auto &rotation = proposal.rotation().matrix();
+            const double odom_yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+            match.proposal.second = Eigen::AngleAxisd(sc_yaw - odom_yaw, Eigen::Vector3d::UnitZ()) * rotation;
+            match.odom_hint = proposal.matrix();
+          }
+          if (use_teaser_)
           {
             match.target_window = SubmapWindow(submap_limits_); // 添加目标子图
             const std::size_t first = h + 1 > static_cast<std::size_t>(submap_limits_.max_frames)
@@ -644,11 +703,23 @@ namespace super_lio_slam
           }
           selected.push_back(h);
           const double gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
-          RCLCPP_DEBUG(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m time_gap=%.3f s",
-                       h, index, distance, gap);
+          if (use_sc)
+          {
+            RCLCPP_INFO(get_logger(),
+                        "SC %zu -> %zu matched: sc_distance=%.4f (< %.4f) yaw=%.1f deg time_gap=%.3f s distance=%.2f m",
+                        h, index, score, sc_distance_threshold_, sc_yaw * 180.0 / std::acos(-1.0),
+                        gap, proposal.translation().norm());
+          }
+          else
+          {
+            RCLCPP_DEBUG(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m time_gap=%.3f s",
+                         h, index, score, gap);
+          }
           task.candidates.push_back(std::move(match));
         }
       }
+      if (use_sc)
+        sc_history_.push_back(std::move(current_sc));
     }
     else // STD 描述子候选
     {
@@ -662,7 +733,7 @@ namespace super_lio_slam
                             .count();
         if (enough_time_since_loop && !descriptors.empty())
         {
-          if (registration_mode_ == "std_teaser_gicp")
+          if (use_teaser_)
           {
             // STD 在此只负责地点召回；时间/距离准入及 TEASER/GICP 验收通过后才形成回环边。
             const auto candidates = std_manager_.SearchCandidates(descriptors); // 查看候选
@@ -1148,7 +1219,7 @@ namespace super_lio_slam
           std::unique_ptr<RegistrationObservation> observation;
 
           // 两条几何验证路径最终都返回 T_H_C：多帧 TEASER+GICP，或 STD 初值直接 GICP。
-          if (registration_mode_ == "std_teaser_gicp")
+          if (use_teaser_)
           {
             Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
             hint.block<3, 3>(0, 0) = candidate.proposal.second;
@@ -1283,7 +1354,7 @@ namespace super_lio_slam
       publishCurrent(latest, true);
     RCLCPP_INFO(get_logger(), "Loop %zu -> %zu %s: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
                 historical, index, decisionText(true, "accepted").c_str(),
-                registration_mode_ == "std_teaser_gicp" ? "TEASER/GICP" : "GICP",
+                use_teaser_ ? "TEASER/GICP" : "GICP",
                 observation.fitness, observation.overlap, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count(), latest);
   }
 
