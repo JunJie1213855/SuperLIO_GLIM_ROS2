@@ -4,6 +4,9 @@
 #include <sys/resource.h>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <cstring>
+#include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
 #include <tbb/concurrent_vector.h>
@@ -77,6 +80,45 @@ namespace LI2Sup
 
   void SuperLIO::init()
   {
+    rcl_interfaces::msg::ParameterDescriptor startup_only;
+    startup_only.read_only = true;
+    const auto mode = data_wrapper_->declare_parameter<std::string>(
+        "lio.downsample.mode", "fixed", startup_only);
+    if (mode != "fixed" && mode != "adaptive")
+      throw std::invalid_argument("lio.downsample.mode must be fixed or adaptive");
+    if (!std::isfinite(g_voxel_fliter_size) || g_voxel_fliter_size <= 0)
+      throw std::invalid_argument("lio.sensor.voxel_fliter_size must be positive and finite");
+    adaptive_downsample_ = mode == "adaptive";
+    AdaptiveVoxelConfig adaptive_config;
+    const auto load = [&]<typename T>(const std::string &name, T &value) {
+      value = data_wrapper_->declare_parameter<T>("lio.downsample.adaptive." + name, value, startup_only);
+    };
+    load("window_size", adaptive_config.window_size);
+    load("min_points", adaptive_config.min_points);
+    load("max_points", adaptive_config.max_points);
+    load("scale_threshold_m", adaptive_config.scale_threshold_m);
+    load("setpoint_exponent", adaptive_config.setpoint_exponent);
+    load("error_sensitivity", adaptive_config.error_sensitivity);
+    load("error_rate_sensitivity", adaptive_config.error_rate_sensitivity);
+    load("p_gain_min", adaptive_config.p_gain_min);
+    load("p_gain_max", adaptive_config.p_gain_max);
+    load("d_gain_min", adaptive_config.d_gain_min);
+    load("d_gain_max", adaptive_config.d_gain_max);
+    load("min_leaf_size_m", adaptive_config.min_leaf_size_m);
+    load("max_leaf_size_m", adaptive_config.max_leaf_size_m);
+    if (adaptive_downsample_)
+      adaptive_voxel_filter_ = std::make_unique<AdaptiveVoxelFilter>(adaptive_config, g_voxel_fliter_size);
+    RCLCPP_INFO(data_wrapper_->get_logger(), "LIO downsample: mode=%s initial_leaf=%.3f m%s",
+                mode.c_str(), g_voxel_fliter_size,
+                adaptive_downsample_ ? " estimation=d mapping=d/2 (GenZ-LIO)" : " estimation=mapping");
+
+    RCLCPP_INFO(data_wrapper_->get_logger(), "LIO observation: point_to_plane");
+    // 有诊断订阅者时才复制残差/雅可比，不修改 ESKF 的门限或权重。
+    observation_points_pub_ = data_wrapper_->create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/lio/observation/points", rclcpp::SensorDataQoS());
+    observation_metrics_pub_ = data_wrapper_->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/lio/observation/metrics", rclcpp::SensorDataQoS());
+
     keyframe_enabled_ = data_wrapper_->declare_parameter<bool>(
         "slam.keyframe.enable", true);
     keyframe_distance_ = std::max(0.0, data_wrapper_->declare_parameter<double>(
@@ -97,6 +139,7 @@ namespace LI2Sup
 
     scan_undistort_full_.reset(new PointCloudType());
     ds_undistort_.reset(new PointCloudType());
+    map_undistort_ = ds_undistort_;
     world_pc_.reset(new PointCloudType());
     ds_world_.reset(new PointCloudType());
 
@@ -106,8 +149,6 @@ namespace LI2Sup
     }
 
     points_world_v3_.reserve(21000);
-    abcd_vec_.resize(20000);
-    effect_knn_idxs_.resize(20000);
     voxel_grid_fliter_.setLeafSize(g_voxel_fliter_size);
 
     state_fn_ = &SuperLIO::stateWaitKFInit;
@@ -319,7 +360,7 @@ namespace LI2Sup
 
     if (g_if_filter)
     {
-      pcl::transformPointCloud(*ds_undistort_, *world_pc_, transformation);
+      pcl::transformPointCloud(*map_undistort_, *world_pc_, transformation);
     }
     else
     {
@@ -572,14 +613,38 @@ namespace LI2Sup
 
   void SuperLIO::DownSample()
   {
-    voxel_grid_fliter_.setInputCloud(scan_undistort_full_);
-    voxel_grid_fliter_.filter(ds_undistort_);
+    if (!adaptive_downsample_)
+    {
+      voxel_grid_fliter_.setInputCloud(scan_undistort_full_);
+      voxel_grid_fliter_.filter(ds_undistort_);
+      map_undistort_ = ds_undistort_;
+      return;
+    }
+    auto output = adaptive_voxel_filter_->process(scan_undistort_full_, measures_.lidar.end_time, g_lidar_imu);
+    ds_undistort_ = std::move(output.estimation);
+    map_undistort_ = std::move(output.mapping);
+    adaptive_voxel_stats_ = output.stats;
+    const auto &s = adaptive_voxel_stats_;
+    if (s.time_reset)
+      RCLCPP_WARN(data_wrapper_->get_logger(), "Adaptive voxel history reset: invalid/repeated/backward scan time");
+    if (s.updated && (last_adaptive_log_time_ < 0 || s.time_reset ||
+                     measures_.lidar.end_time - last_adaptive_log_time_ >= 5.0))
+    {
+      // 用传感器时间限频；即使未启用 /clock 也能稳定观察控制器工作状态。
+      RCLCPP_INFO(data_wrapper_->get_logger(),
+                  "Adaptive voxel: input=%zu probe=%zu estimation=%zu mapping=%zu skipped=%zu "
+                  "median=%.2f scale=%.2f target=%.0f leaf=%.3f->%.3f m dt=%.4f filter=%.2f ms clamped=%d",
+                  s.input, s.probe, s.estimation, s.mapping, s.skipped, s.median, s.scale, s.target,
+                  s.previous_leaf, s.leaf, s.dt, s.filter_ms, s.clamped);
+      last_adaptive_log_time_ = measures_.lidar.end_time;
+    }
   }
 
   struct ThreadACC
   {
     M6d HTVH = M6d::Zero();
     V6d HTVr = V6d::Zero();
+    std::size_t plane_count = 0;
     ThreadACC() : HTVH(M6d::Zero()), HTVr(V6d::Zero()) {}
   };
 
@@ -588,28 +653,47 @@ namespace LI2Sup
     // 观测只直接约束 6 维位姿；速度、零偏和重力通过 ESKF 的交叉协方差间接得到修正。
     size_t ptsize = ds_undistort_->size();
 
-    static std::vector<float> _lengths;
+    // 点数预算是软目标，控制器暂态仍可能超过 20000；全部缓存按实际点数扩容。
     points_body_v3_.resize(ptsize);
-    _lengths.resize(ptsize);
-
+    point_lengths_.resize(ptsize);
+    abcd_vec_.resize(ptsize);
+    effect_knn_idxs_.resize(ptsize);
+    effect_mask_.assign(ptsize, 0);
+    effect_knn_mask_.assign(ptsize, 0);
+    plane_candidate_mask_.assign(ptsize, 0);
+    const bool capture = observation_points_pub_->get_subscription_count() > 0 ||
+                         observation_metrics_pub_->get_subscription_count() > 0;
+    // 最近地图点只用于诊断平面支撑距离，不构成距离观测。
+    diagnostic_nearest_targets_.resize(capture ? ptsize : 0);
+    observation_samples_.resize(capture ? ptsize : 0);
+    plane_observation_count_ = 0;
     effect_knn_num_ = ptsize;
+    if (ptsize == 0)
+    {
+      if (capture) PublishObservationDiagnostics(kf_->GetSE3());
+      return;
+    }
+
     std::iota(effect_knn_idxs_.begin(), effect_knn_idxs_.begin() + ptsize, 0);
 
     for (size_t i = 0; i < ptsize; ++i)
     {
       const auto &point_body_pcl = ds_undistort_->points[i];
       points_body_v3_[i] = V3(point_body_pcl.x, point_body_pcl.y, point_body_pcl.z);
-      _lengths[i] = points_body_v3_[i].norm();
+      point_lengths_[i] = points_body_v3_[i].norm();
     }
 
     ivox_->reset_max_group();
     int iter_num = 0;
+    const SE3 prior_pose = kf_->GetSE3();
 
     kf_->UpdateObserve([&, this](const ESKF::KFState &kf_state, M6 &HTVH, V6 &HTVr)
                        {
     const SE3 pose = kf_state.pose;
     const bool need_converge = kf_state.need_converge;
     const M3d R_transpose = (pose.R_.transpose()).cast<double>();
+    // 每次迭代清空实际采用类型，最终保留最后一次线性化真正送进 ESKF 的观测。
+    if (capture) std::fill(observation_samples_.begin(), observation_samples_.end(), ObservationSample{});
 
     tbb::enumerable_thread_specific<ThreadACC> tls_acc;
 
@@ -623,48 +707,60 @@ namespace LI2Sup
           V3& point_body = points_body_v3_[idx];
           V3 point_world = pose * point_body;
 
-          // 前几次迭代随位姿重新搜索近邻/拟合平面；收敛阶段复用平面减少搜索开销。
+          if (need_converge && !effect_mask_[idx]) continue;
+          effect_mask_[idx] = false;
+          // 前几次迭代重新查询；收敛阶段固定候选，但仍用当前位姿重新计算残差和门限。
           if(!need_converge){
             top_K.reset();
             ivox_->getTopK(point_world, top_K);
-            if(top_K.count < 4){
-              effect_mask_[idx] = false;
-              effect_knn_mask_[idx] = false;
-              continue;
+            plane_candidate_mask_[idx] = 0;
+            const bool has_plane = top_K.count >= 4 &&
+                                   calc_plane_coeff(top_K.count, top_K.points_, abcd_vec_[idx]);
+            effect_knn_mask_[idx] = top_K.count >= 4;
+            if (has_plane)
+              plane_candidate_mask_[idx] = 1;
+            if (capture && has_plane) {
+              // KNNHeap 是无序堆，points_[0] 不保证最近，必须显式选最小距离。
+              int nearest = 0;
+              for (int k = 1; k < top_K.count; ++k)
+                if (top_K.dist2_[k] < top_K.dist2_[nearest]) nearest = k;
+              diagnostic_nearest_targets_[idx] = top_K.points_[nearest];
             }
-            effect_knn_mask_[idx] = true;
-            effect_mask_[idx] = calc_plane_coeff(top_K.count, top_K.points_, abcd_vec_[idx]);
           }
 
-          if(!effect_mask_[idx]) continue;
+          if (plane_candidate_mask_[idx] == 1) {
+            auto& abcd = abcd_vec_[idx];
+            scalar error;
+            if (compute_error(abcd, point_world, point_lengths_[idx], error)) {
+              V3d normvec(abcd[0], abcd[1], abcd[2]);
+              V3d nb = R_transpose * normvec;
+              V3d point_body_d = point_body.cast<double>();
+              V6d J;
+              // r = n^T(Rp+t)+d；右扰动雅可比为 [(p x R^T n)^T, n^T]。
+              // J 在此按列向量保存，累加得到 H^T V^-1 H 与 -H^T V^-1 r。
+              J.head<3>() = point_body_d.cross(nb);
+              J.tail<3>() = normvec;
 
-          auto& abcd = abcd_vec_[idx];
-          scalar error;
-          effect_mask_[idx] = compute_error(abcd, point_world, _lengths[idx], error);
-          if(!effect_mask_[idx]) continue;
-          
-          {
-            V3d normvec(abcd[0], abcd[1], abcd[2]);
-            V3d nb = R_transpose * normvec;
-            V3d point_body_d = point_body.cast<double>();
-            V6d J;
-            // r = n^T(Rp+t)+d；右扰动雅可比为 [(p x R^T n)^T, n^T]。
-            // J 在此按列向量保存，累加得到 H^T V^-1 H 与 -H^T V^-1 r。
-            J.head<3>() = point_body_d.cross(nb);
-            J.tail<3>() = normvec;
-      
-            // 1000 是当前实现的固定残差信息权重；线程各自累加，最后归并以避免写冲突。
-            local_acc.HTVH += J * 1000 * J.transpose();
-            local_acc.HTVr -= J * 1000 * error;
+              // 1000 是当前实现的固定残差信息权重；线程各自累加，最后归并以避免写冲突。
+              local_acc.HTVH += J * 1000 * J.transpose();
+              local_acc.HTVr -= J * 1000 * error;
+              effect_mask_[idx] = true;
+              ++local_acc.plane_count;
+              if (capture) observation_samples_[idx] = ObservationSample{1, error, 1000.0, J};
+            }
           }
+          // 无可靠平面或平面残差未通过门限时，直接丢弃该点，不回退到点距离。
+
         }
     });
 
     M6d sum_HTVH = M6d::Zero();
     V6d sum_HTVr = V6d::Zero();
+    plane_observation_count_ = 0;
     for(const auto& local_acc : tls_acc){
       sum_HTVH += local_acc.HTVH;
       sum_HTVr += local_acc.HTVr;
+      plane_observation_count_ += local_acc.plane_count;
     }
     HTVH = sum_HTVH.cast<scalar>();
     HTVr = sum_HTVr.cast<scalar>();
@@ -684,13 +780,77 @@ namespace LI2Sup
 
     iter_num++; });
 
+    if (capture) PublishObservationDiagnostics(prior_pose);
     frame_num_++;
+  }
+
+  void SuperLIO::PublishObservationDiagnostics(const SE3 &prior_pose)
+  {
+    const auto state = kf_->GetNavState();
+    const SE3 pose = kf_->GetSE3();
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.frame_id = "world";
+    cloud.header.stamp = rclcpp::Time(static_cast<int64_t>(std::llround(measures_.lidar.end_time * 1e9)));
+    sensor_msgs::PointCloud2Modifier modifier(cloud);
+    using Field = sensor_msgs::msg::PointField;
+    // 残差与 J 属于更新前的最后线性化；xyz 和 residual_after 用更新后位姿重算，匹配目标保持不变。
+    modifier.setPointCloud2Fields(16,
+        "x",1,Field::FLOAT32, "y",1,Field::FLOAT32, "z",1,Field::FLOAT32, "rgb",1,Field::FLOAT32,
+        "residual",1,Field::FLOAT32, "residual_after",1,Field::FLOAT32,
+        "information",1,Field::FLOAT32, "nearest_distance",1,Field::FLOAT32,
+        "jrx",1,Field::FLOAT32, "jry",1,Field::FLOAT32, "jrz",1,Field::FLOAT32,
+        "jtx",1,Field::FLOAT32, "jty",1,Field::FLOAT32, "jtz",1,Field::FLOAT32,
+        "kind",1,Field::UINT32, "source_index",1,Field::UINT32);
+    modifier.resize(plane_observation_count_);
+    std::size_t output_index = 0;
+    for (std::size_t i = 0; i < observation_samples_.size(); ++i)
+    {
+      const auto &s = observation_samples_[i];
+      if (s.kind == 0) continue;
+      const V3 world = pose * points_body_v3_[i];
+      const double nearest = (world - diagnostic_nearest_targets_[i]).norm();
+      const auto &plane = abcd_vec_[i];
+      const double after = plane[0]*world.x() + plane[1]*world.y() + plane[2]*world.z() + plane[3];
+      const uint32_t rgb = 0x0000ffU; // 当前仅发布蓝色点到面观测源点。
+      float packed_rgb;
+      std::memcpy(&packed_rgb, &rgb, sizeof(rgb));
+      const float values[14] = {world.x(),world.y(),world.z(),packed_rgb,
+          static_cast<float>(s.residual),static_cast<float>(after),static_cast<float>(s.information),
+          static_cast<float>(nearest),static_cast<float>(s.jacobian[0]),static_cast<float>(s.jacobian[1]),
+          static_cast<float>(s.jacobian[2]),static_cast<float>(s.jacobian[3]),
+          static_cast<float>(s.jacobian[4]),static_cast<float>(s.jacobian[5])};
+      auto *record = cloud.data.data() + output_index * cloud.point_step;
+      std::memcpy(record, values, sizeof(values));
+      std::memcpy(record + 56, &s.kind, sizeof(s.kind));
+      const uint32_t source = static_cast<uint32_t>(i);
+      std::memcpy(record + 60, &source, sizeof(source));
+      ++output_index;
+    }
+    cloud.is_dense = true;
+    observation_points_pub_->publish(cloud);
+    std_msgs::msg::Float64MultiArray metrics;
+    metrics.layout.dim.resize(1);
+    metrics.layout.dim[0].label = "superlio_observation_v1:stamp,input,planes,points,leaf_m,scale_m,target_points,"
+        "x,y,z,correction_m,correction_deg,speed_mps,pose_cov_trace,map_resolution_m,imu_acc_norm,imu_gyro_norm";
+    const M3 delta = prior_pose.R_.transpose() * pose.R_;
+    const double angle = std::acos(std::clamp(0.5*(static_cast<double>(delta.trace())-1.0),-1.0,1.0))*180.0/M_PI;
+    metrics.data = {measures_.lidar.end_time, static_cast<double>(ds_undistort_->size()),
+        static_cast<double>(plane_observation_count_),0.0, // v1 协议保留 points 列，恒为 0。
+        adaptive_downsample_ ? adaptive_voxel_stats_.leaf : g_voxel_fliter_size,
+        adaptive_downsample_ ? adaptive_voxel_stats_.scale : 0.0,
+        adaptive_downsample_ ? adaptive_voxel_stats_.target : 0.0,
+        pose.t_.x(),pose.t_.y(),pose.t_.z(),(pose.t_-prior_pose.t_).norm(),angle,state.v.norm(),
+        kf_->GetCov().topLeftCorner<6,6>().trace(),g_ivox_resolution,
+        measures_.imu.empty() ? 0.0 : measures_.imu.back().acc.norm(),
+        measures_.imu.empty() ? 0.0 : measures_.imu.back().gyr.norm()};
+    metrics.layout.dim[0].size = metrics.layout.dim[0].stride = metrics.data.size();
+    observation_metrics_pub_->publish(metrics);
   }
 
   void SuperLIO::UpdateMap()
   {
     // 使用观测更新后的位姿变换降采样点，地图与 ESKF 始终处于同一个当前参考系。
-    const size_t ptsize = ds_undistort_->size();
+    const size_t ptsize = map_undistort_->size();
     if (ptsize == 0)
       return;
 
@@ -702,8 +862,9 @@ namespace LI2Sup
 
     for (size_t i = 0; i < ptsize; ++i)
     {
-      const auto &pt = points_body_v3_[i];
-      points_world_v3_[i] = R * pt + t;
+      // 入图点与观测点的质心通常不同，必须独立读取，不能复用观测缓存的索引。
+      const auto &pt = (*map_undistort_)[i];
+      points_world_v3_[i] = R * V3(pt.x, pt.y, pt.z) + t;
     }
 
     ivox_->insert(points_world_v3_);

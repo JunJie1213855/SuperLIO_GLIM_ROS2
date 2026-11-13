@@ -92,6 +92,26 @@ ros2 bag play "$BAG" --topics /velodyne_points /imu/data --rate 0.5
 
 使用实时传感器时，启动雷达/IMU 驱动替代 bag 播放。检查 YAML 中的话题、外参和点云时间单位。
 
+扫描滤波默认 `fixed`。使用 GenZ-LIO 自适应滤波时，在建图或重定位命令末尾增加 `downsample_mode:=adaptive`，例如：
+
+```bash
+ros2 launch super_lio_slam vlp32.launch.py enable_loop_backend:=false downsample_mode:=adaptive rviz:=true
+```
+
+独立的 `lio.launch.py`、`slam.launch.py` 和 `relocation.launch.py` 同样支持该参数；不传时读取传感器 YAML 的 `lio.downsample.mode`。模式只在启动时设置，切换需重启节点。`lio.sensor.voxel_fliter_size` 为固定边长 / 自适应初值；其余参数与低频日志说明见 [自适应体素滤波](genz_adaptive_voxel_plan.md)。
+
+LIO 与重定位均仅使用点到面观测。NarrowWide 自适应采样示例：
+
+```bash
+ros2 launch super_lio_slam vlp16.launch.py enable_loop_backend:=false \
+  downsample_mode:=adaptive rviz:=true
+# 另一个终端
+ros2 bag play ~/dataset/narrowwide/vlp16_handheld_a_01/ \
+  --topics /velodyne_points /vectornav/IMU --rate 1.0
+```
+
+平面匹配失败的点直接丢弃，不再回退到点距离观测；蓝色观测点和残差直方图见 [残差诊断](observation_diagnostics.md)。
+
 ## 2. 建图定位 + 回环
 
 以下三选一，终端 B 仍按第 1 节播放数据。

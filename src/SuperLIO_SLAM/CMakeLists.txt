@@ -109,6 +109,13 @@ ament_target_dependencies(std_descriptor_core PUBLIC
 target_link_libraries(std_descriptor_core PUBLIC
   Eigen3::Eigen ${PCL_LIBRARIES} Ceres::ceres OpenMP::OpenMP_CXX)
 
+add_library(adaptive_voxel_filter STATIC src/lio/AdaptiveVoxelFilter.cpp)
+set_target_properties(adaptive_voxel_filter PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(adaptive_voxel_filter PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>)
+target_link_libraries(adaptive_voxel_filter PUBLIC basic_core)
+
 add_library(lio
   src/lio/ESKF.cpp
   src/lio/params.cpp
@@ -126,7 +133,7 @@ ament_target_dependencies(lio PUBLIC
   rclcpp std_msgs geometry_msgs sensor_msgs visualization_msgs nav_msgs
   pcl_ros pcl_conversions livox_ros_driver2 tf2_ros rosidl_default_runtime)
 target_link_libraries(lio PUBLIC
-  basic_core submap_registration Eigen3::Eigen ${PCL_LIBRARIES} glog
+  basic_core adaptive_voxel_filter submap_registration Eigen3::Eigen ${PCL_LIBRARIES} glog
   ${cpp_typesupport_target})
 
 add_executable(super_lio_node src/apps/super_lio_node.cpp)
@@ -167,7 +174,7 @@ if(WITH_JEMALLOC)
   endforeach()
 endif()
 
-install(TARGETS basic_core std_descriptor_core lio
+install(TARGETS basic_core std_descriptor_core adaptive_voxel_filter lio
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -188,6 +195,19 @@ ament_package()
 
 if(BUILD_TESTING)
   enable_testing()
+  add_executable(adaptive_voxel_filter_test test/adaptive_voxel_filter_test.cpp)
+  target_link_libraries(adaptive_voxel_filter_test PRIVATE adaptive_voxel_filter)
+  add_test(NAME adaptive_voxel_filter_test COMMAND adaptive_voxel_filter_test)
+  add_executable(lio_downsample_test test/lio_downsample_test.cpp)
+  target_link_libraries(lio_downsample_test PRIVATE lio)
+  add_test(NAME lio_downsample_test COMMAND lio_downsample_test)
+  add_executable(plane_observation_test test/plane_observation_test.cpp)
+  target_link_libraries(plane_observation_test PRIVATE lio)
+  add_test(NAME plane_observation_test COMMAND plane_observation_test)
+  set_tests_properties(plane_observation_test PROPERTIES TIMEOUT 45
+    ENVIRONMENT "ROS_DOMAIN_ID=45;ROS_LOCALHOST_ONLY=1")
+  set_tests_properties(lio_downsample_test PROPERTIES TIMEOUT 45
+    ENVIRONMENT "ROS_DOMAIN_ID=48;ROS_LOCALHOST_ONLY=1")
   add_executable(relocation_pcd_check test/relocation_pcd_check.cpp)
   target_link_libraries(relocation_pcd_check PRIVATE submap_registration)
   add_executable(optimized_map_writer_test test/optimized_map_writer_test.cpp src/loop/OptimizedMapWriter.cpp)
@@ -203,6 +223,8 @@ if(BUILD_TESTING)
   add_executable(relocation_motion_test test/relocation_motion_test.cpp)
   target_link_libraries(relocation_motion_test PRIVATE lio)
   add_test(NAME relocation_motion_test COMMAND relocation_motion_test)
-  set_tests_properties(relocation_motion_test PROPERTIES TIMEOUT 45
+  add_test(NAME relocation_motion_adaptive_test COMMAND relocation_motion_test adaptive)
+  set_tests_properties(relocation_motion_test relocation_motion_adaptive_test PROPERTIES TIMEOUT 45
+    RUN_SERIAL TRUE
     ENVIRONMENT "ROS_DOMAIN_ID=49;ROS_LOCALHOST_ONLY=1")
 endif()

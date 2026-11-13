@@ -4,6 +4,10 @@ ROS 2 LiDAR / IMU 建图定位、在线回环、参考地图重定位与 GLIM �
 
 **运行命令见 [Quickstart](docs/quickstart.md)**：基础建图 → STD / SC / 距离回环 → 保存地图 → 重定位 → 多会话合并。
 
+扫描滤波支持 `fixed`（默认，原固定体素）和 `adaptive`（GenZ-LIO 场景尺度 + PD 控制，观测 / 入图双分辨率）。建图或重定位 launch 可加 `downsample_mode:=adaptive`；参数和数学原理见 [自适应体素滤波](docs/genz_adaptive_voxel_plan.md)。
+
+LIO 与重定位仅采用点到面观测，平面匹配失败的点直接丢弃；蓝色观测点和残差直方图见 [残差诊断](docs/observation_diagnostics.md)。
+
 支持通过 CMake 选项 `SUPERLIO_USE_JEMALLOC=ON` 为算法节点直接链接 jemalloc，默认关闭。安装、编译和验证方法见 [Quickstart](docs/quickstart.md#可选jemalloc-内存分配器)。
 
 | 功能 | 当前流程 |

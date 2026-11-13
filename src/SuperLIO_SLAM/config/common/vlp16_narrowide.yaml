@@ -11,11 +11,12 @@
     lio.ros.imu_topic: "vectornav/IMU"
 
     lio.sensor.lidar_type: 3
-    lio.sensor.blind: 0.01
+    lio.sensor.blind: 0.00
     lio.sensor.maxrange: 60.0
     lio.sensor.filter_rate: 3
     lio.sensor.enable_downsample: true
-    lio.sensor.voxel_fliter_size: 0.25
+    lio.downsample.mode: fixed  # fixed / adaptive (GenZ-LIO)
+    lio.sensor.voxel_fliter_size: 0.5
     lio.sensor.gravity_norm: 9.810
     lio.sensor.imu_type: 1
     lio.sensor.imu_na: 0.1

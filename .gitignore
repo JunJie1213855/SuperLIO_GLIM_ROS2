@@ -61,6 +61,7 @@ logs/
 /install_standalone/
 /log_standalone/
 /results/
+/diagnostics/
 
 # Tests: keep C++/Python sources and test configuration in Git.
 # Write local reports/artifacts into these directories instead of the source tree.

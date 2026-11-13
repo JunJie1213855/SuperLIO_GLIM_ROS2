@@ -15,6 +15,7 @@
     lio.sensor.maxrange: 1000.0
     lio.sensor.filter_rate: 3
     lio.sensor.enable_downsample: true
+    lio.downsample.mode: fixed  # fixed / adaptive (GenZ-LIO)
     lio.sensor.voxel_fliter_size: 0.5
     lio.sensor.gravity_norm: 9.81
     lio.sensor.imu_type: 0

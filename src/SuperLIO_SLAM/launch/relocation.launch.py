@@ -24,6 +24,9 @@ def _relocation_node(context):
     map_path=LaunchConfiguration('map_path').perform(context)
     if map_path:
         overrides['relocation.map_path']=map_path
+    mode=LaunchConfiguration('downsample_mode').perform(context)
+    if mode:
+        overrides['lio.downsample.mode']=mode
     return [Node(package='super_lio_slam',executable='relocation_node',name='relocation_node',namespace='',
                  output='screen',parameters=[LaunchConfiguration('sensor_config'),
                  LaunchConfiguration('relocation_config'),overrides],additional_env={'LD_LIBRARY_PATH':library_path},
@@ -36,6 +39,8 @@ def generate_launch_description():
     config=lambda name: PathJoinSubstitution([share,'config',name])
     return LaunchDescription([
         DeclareLaunchArgument('sensor_config',default_value=config('common/robosense_airy.yaml')),
+        DeclareLaunchArgument('downsample_mode',default_value='',choices=['','fixed','adaptive'],
+                              description='LIO sampling; empty uses sensor YAML (default fixed)'),
         DeclareLaunchArgument('relocation_config',default_value=config('relocation/relocation.yaml')),
         DeclareLaunchArgument('map_path',default_value='',description='Absolute reference PCD path; empty uses YAML'),
         DeclareLaunchArgument('use_sim_time',default_value='false',choices=['true','false']),

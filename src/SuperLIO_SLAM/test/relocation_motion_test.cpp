@@ -22,6 +22,7 @@ Motion motion(double time) {
   return {u<2?.1*u*u:.4+.4*(u-2),(u>0 && u<2)?.2:0,.08*u,u>0?.08:0};
 }
 int main(int argc,char** argv) {
+  const bool adaptive = argc > 1 && std::string(argv[1]) == "adaptive";
   rclcpp::init(argc,argv);
   int exit_code=0;
   try {
@@ -43,6 +44,7 @@ int main(int argc,char** argv) {
     auto map_path=folder/"reference.pcd";
     pcl::io::savePCDFileBinary(map_path.string(),world);
     std::vector<rclcpp::Parameter> params{
+      {"lio.downsample.mode", adaptive ? "adaptive" : "fixed"},
       // A stopped ROS clock and a legacy alignment flag must not block sensor-time tracking.
       {"use_sim_time",true}, {"lio.ros.align_sensor_time_to_ros_clock",true},
       {"relocation.map_path",map_path.string()}, {"lio.ros.lidar_topic","/test/relocation/cloud"},
@@ -141,7 +143,8 @@ int main(int argc,char** argv) {
     }
     require(have_imu,"missing world-to-imu TF");
     timer->cancel();executor.remove_node(wrapper);executor.remove_node(sensor);timer.reset();lio.reset();
-    std::cout<<"PASS: production ROS intra-process pipeline; local="<<local_count<<" world="<<world_count
+    std::cout<<"PASS: production ROS intra-process pipeline; mode="<<(adaptive?"adaptive":"fixed")
+             <<" local="<<local_count<<" world="<<world_count
              <<" max_motion_error="<<max_error<<" m; monotonic clocks and one TF parent; artifacts="<<folder<<std::endl;
   } catch(const std::exception& e){std::cerr<<"FAIL: "<<e.what()<<std::endl;exit_code=1;}
   rclcpp::shutdown();return exit_code;

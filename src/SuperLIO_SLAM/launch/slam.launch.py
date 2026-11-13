@@ -43,11 +43,26 @@ def _make_loop_backend(context):
     )]
 
 
+def _make_lio(context):
+    overrides = {
+        'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
+        'slam.keyframe.enable': ParameterValue(LaunchConfiguration('enable_loop_backend'), value_type=bool),
+    }
+    mode = LaunchConfiguration('downsample_mode').perform(context)
+    if mode:
+        overrides['lio.downsample.mode'] = mode
+    return [Node(
+        package='super_lio_slam', executable='super_lio_node', name='super_lio_node', namespace='',
+        output='screen',
+        parameters=[LaunchConfiguration('sensor_config'), LaunchConfiguration('slam_config'), overrides],
+        arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
+    )]
+
+
 def generate_launch_description():
     share = FindPackageShare('super_lio_slam')
     config = lambda name: PathJoinSubstitution([share, 'config', name])
     use_sim_time = ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)
-    enable_loop = ParameterValue(LaunchConfiguration('enable_loop_backend'), value_type=bool)
     default_rviz = PathJoinSubstitution([
         share, 'rviz', PythonExpression([
             "'slam.rviz' if '", LaunchConfiguration('enable_loop_backend'),
@@ -57,6 +72,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('sensor_config', default_value=config('common/livox_360.yaml'),
                               description='Sensor and SuperLIO front-end YAML'),
+        DeclareLaunchArgument('downsample_mode', default_value='', choices=['', 'fixed', 'adaptive'],
+                              description='LIO sampling; empty uses sensor YAML (default fixed)'),
         DeclareLaunchArgument('slam_config', default_value=config('loop/slam.yaml'),
                               description='Keyframe, STD, iSAM2 and map parameters'),
         DeclareLaunchArgument('registration_config', default_value=config('loop/loop_teaser_gicp.yaml'),
@@ -87,15 +104,7 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz_log_level', default_value='warn',
                               choices=['debug', 'info', 'warn', 'error', 'fatal']),
         # Explicit namespaces make inline overrides node-specific rather than wildcard YAML.
-        Node(
-            package='super_lio_slam', executable='super_lio_node', name='super_lio_node', namespace='',
-            output='screen',
-            parameters=[LaunchConfiguration('sensor_config'), LaunchConfiguration('slam_config'), {
-                'use_sim_time': use_sim_time,
-                'slam.keyframe.enable': enable_loop,
-            }],
-            arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
-        ),
+        OpaqueFunction(function=_make_lio),
         OpaqueFunction(function=_make_loop_backend,
                        condition=IfCondition(LaunchConfiguration('enable_loop_backend'))),
         Node(

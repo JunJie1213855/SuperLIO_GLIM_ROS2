@@ -8,7 +8,8 @@ ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。完整运�
 - 关键帧/STD、异步配准、地图重建分开执行。队列过载只淘汰旧检测任务，不删除关键帧和图节点；地图请求合并为最新快照。
 - 重定位直接配准固定 S 系累积局部地图快照，不使用滑动窗口，配准后变换最新 KF 状态和协方差，切换世界参考地图。
 - 点云、位姿、关键帧和 TF 保留传感器时间。默认无需 `/clock`，旧时间对齐参数弃用并忽略。
-- 室内/室外配准 YAML 独立；RViz 默认强度伪彩色、3 像素、Alpha 1，地图独立体素滤波。
+- 扫描滤波支持 `fixed`（默认）与 `adaptive`（GenZ-LIO 尺度感知 PD，观测 d / 入图 d/2）；普通建图和重定位共用实现，详见[原理与参数](../../docs/genz_adaptive_voxel_plan.md)。
+- 室内/室外配准 YAML 独立；建图 RViz 使用 GenZ-LIO 风格的白色累积地图背景（透明度 0.2、1 像素），当前帧实际参与点到面更新的点为蓝色；LIO 和重定位均只采用点到面观测。残差直方图与统计见[诊断说明](../../docs/observation_diagnostics.md)。
 - 日志对 `accepted` / `rejected` 和最终 `stage` 理由使用绿/红色，数值保持原色。
 
 ## 构建
@@ -62,6 +63,7 @@ ros2 bag play /mnt/d/dataset/SLAM/robosense/mapping
 | 参数 | 含义 |
 |---|---|
 | `sensor_config` | 话题、点云字段/单位、外参、前端参数 |
+| `downsample_mode` | `fixed` / `adaptive`；未指定时读取 YAML 的 `lio.downsample.mode`（默认 fixed），切换需重启 |
 | `slam_config` | 关键帧、STD、图优化与地图发布；Unitree 使用 `unitree_slam.yaml` |
 | `registration_config` | TEASER++、GICP 和接受门限；可覆盖入口默认配置 |
 | `enable_loop_backend` | 默认 true；false 同时关闭后端与关键帧发布 |

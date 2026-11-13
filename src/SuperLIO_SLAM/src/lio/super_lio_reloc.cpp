@@ -274,7 +274,7 @@ namespace LI2Sup
       return false;
     }
     VV3 points;
-    for (const auto &p : *ds_undistort_)
+    for (const auto &p : *map_undistort_)
       points.push_back(rotation * p.getVector3fMap());
     local_ivox_->insert(points);
     // 系统初始位姿
@@ -292,12 +292,14 @@ namespace LI2Sup
 
   void SuperLIOReLoc::limitScan()
   {
-    if (ds_undistort_->size() <= 20000)
+    // fixed 保留原先限点行为；adaptive 由控制器采样，观测缓存已支持动态点数。
+    if (adaptive_downsample_ || ds_undistort_->size() <= 20000)
       return;
     CloudPtr capped(new PointCloudType);
     for (std::size_t i = 0; i < 20000; ++i)
       capped->push_back((*ds_undistort_)[i * ds_undistort_->size() / 20000]);
     ds_undistort_ = capped;
+    map_undistort_ = ds_undistort_;
   }
 
   void SuperLIOReLoc::rememberLocalPose()
@@ -606,11 +608,12 @@ namespace LI2Sup
     limitScan();             // 扫描限制
     Observe();               // 观测更新
     tracking_good_ = 0;
-    int planes = 0;
+    int valid_observations = 0;
     for (std::size_t i = 0; i < ds_undistort_->size(); ++i)
       if (effect_mask_[i])
-        ++planes;
-    tracking_good_ = planes >= min_plane_points_ && kf_->GetSE3().matrix().allFinite();
+        ++valid_observations;
+    // 有效观测仅包含通过匹配和残差检查的点到面项。
+    tracking_good_ = valid_observations >= min_plane_points_ && kf_->GetSE3().matrix().allFinite();
    
     if (stage_ == Stage::Local) // 如果是局部建图，就尝试进行重定位
     {
