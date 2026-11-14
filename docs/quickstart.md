@@ -98,7 +98,7 @@ ros2 bag play "$BAG" --topics /velodyne_points /imu/data --rate 0.5
 ros2 launch super_lio_slam vlp32.launch.py enable_loop_backend:=false downsample_mode:=adaptive rviz:=true
 ```
 
-独立的 `lio.launch.py`、`slam.launch.py` 和 `relocation.launch.py` 同样支持该参数；不传时读取传感器 YAML 的 `lio.downsample.mode`。模式只在启动时设置，切换需重启节点。`lio.sensor.voxel_fliter_size` 为固定边长 / 自适应初值；其余参数与低频日志说明见 [自适应体素滤波](genz_adaptive_voxel_plan.md)。
+独立的 `lio.launch.py`、`slam.launch.py` 和 `relocation.launch.py` 同样支持该参数；不传时读取传感器 YAML 的 `lio.downsample.mode`。模式只在启动时设置，切换需重启节点。`lio.sensor.voxel_fliter_size` 为固定边长 / 自适应初值。自适应模式的 `Adaptive voxel` 日志包含场景尺度、目标点数、滤波前后的体素边长和耗时。
 
 LIO 与重定位均仅使用点到面观测。NarrowWide 自适应采样示例：
 
@@ -110,34 +110,31 @@ ros2 bag play ~/dataset/narrowwide/vlp16_handheld_a_01/ \
   --topics /velodyne_points /vectornav/IMU --rate 1.0
 ```
 
-平面匹配失败的点直接丢弃，不再回退到点距离观测；蓝色观测点和残差直方图见 [残差诊断](observation_diagnostics.md)。
+平面匹配失败的点直接丢弃。RViz 的 `current (plane blue)` 显示参与更新的点。残差信息发布到 `/lio/observation/points`，统计量发布到 `/lio/observation/metrics`。
 
 ## 2. 建图定位 + 回环
 
-以下三选一，终端 B 仍按第 1 节播放数据。
+默认启用 Scan Context 回环。终端 B 按第 1 节播放数据。
 
 ```bash
-# 默认：STD → 多帧 TEASER++ → GICP → iSAM2
 ros2 launch super_lio_slam vlp32.launch.py rviz:=true
-
-# Scan Context → 多帧 TEASER++ → GICP → iSAM2
-ros2 launch super_lio_slam vlp32.launch.py loop_registration_mode:=sc_teaser_gicp rviz:=true
-
-# 距离检索 → 多帧 TEASER++ → GICP → iSAM2
-ros2 launch super_lio_slam vlp32.launch.py loop_candidate_mode:=distance rviz:=true
 ```
 
-三种方法默认均要求候选时间差 **>30 s**、原始里程计距离 **≤15 m**，并接受配准质量检查。距离半径可用 `loop_candidate_radius_m:=15.0` 覆盖。
+历史关键帧先按传感器时间差 **>30 s**、原始里程计距离 **≤15 m** 筛选，再比较 Scan Context 描述子。候选经多帧子图 GICP 验收后加入 iSAM2。用 `loop_candidate_radius_m` 调整搜索半径，用 `registration_config` 指定配准配置。
 
-仅移除粗配准作对比，保持默认多帧模式，只切换 `use_teaserpp`：
+| 默认配置 | 使用入口 | 子图与当前帧覆盖率 | 内点 MSE |
+|---|---|---:|---:|
+| `loop_indoor_gicp.yaml` | Unitree L1、Robosense Airy | 均 > 90% | < 0.10 m² |
+| `loop_outdoor_gicp.yaml` | VLP32、S3E | 均 > 90% | < 0.15 m² |
+| `loop_gicp.yaml` | 通用 `slam.launch.py`、独立 `loop_backend.launch.py` | 均 > 80% | < 0.10 m² |
 
-```bash
-ros2 launch super_lio_slam vlp32.launch.py use_teaserpp:=false rviz:=true
-# 对照组：use_teaserpp:=true；每次重启节点并从同一 bag 起点回放。
-# tmux 脚本：USE_TEASERPP=false ./scripts/start_mapping.sh slam
-```
+日志 `SC ... matched` 表示找到候选。`GICP ... accepted` 表示几何验收通过，`Loop ... accepted` 表示约束已加入位姿图。GICP 的初值来源显示为 `sc_yaw` 或 `odom`，拒绝原因见 `stage`。
 
-关闭后使用 LIO 相对位姿初值直接做 GICP，保留相同多帧子图和精配准验收门限；重定位不受影响。参数只读，修改需重启。
+### 旧版命令迁移
+
+1. 从 launch 命令删除 `loop_candidate_mode`、`loop_registration_mode` 和 `use_teaserpp`。`enable_loop_backend:=true` 时使用 Scan Context 和多帧 GICP。
+2. 如果显式传了 `registration_config`，将旧的 `loop_teaser_gicp.yaml`、`loop_indoor_teaser_gicp.yaml`、`loop_outdoor_teaser_gicp.yaml` 分别换为 `loop_gicp.yaml`、`loop_indoor_gicp.yaml`、`loop_outdoor_gicp.yaml`。旧的 `loop_distance_teaser_gicp.yaml` 换为对应传感器的 GICP 配置。
+3. 自定义 YAML 以新配置为模板，迁入需要保留的子图、GICP 和质量门限。将 `std_registration_top_k` 改为 `registration_top_k`。
 
 ## 3. 保存地图
 
@@ -151,7 +148,7 @@ ros2 launch super_lio_slam vlp32.launch.py \
   save_map_voxel_size:=0.2 save_map_on_shutdown:=true rviz:=true
 ```
 
-需要距离回环时再加 `loop_candidate_mode:=distance`。建图结束，停止输入并确认关键帧已接收完，在另一终端调用：
+建图结束，停止输入并确认关键帧已接收完，在另一终端调用：
 
 ```bash
 ros2 service call /lio_slam/save_optimized_map std_srvs/srv/Trigger '{}'
@@ -183,7 +180,7 @@ ros2 launch super_lio_slam relocation.launch.py \
   map_path:="$OUT/reference_map.pcd" rviz:=true
 ```
 
-当前重定位默认采用独立 TEASER++ 工具的全局粗配准配置：`fpfh_matching_mode: nearest`、最多 2000 对、`teaser_inlier_selection: pmc_exact`、最大团预算 30 秒；体素/法向/特征半径为 0.3/0.9/1.5 米。启动日志应显示该配置。后台求解可能较慢，前端继续运行；回环仍保留原有轻量配置。
+重定位需用 `-DSUPERLIO_WITH_TEASER=ON` 构建，运行时使用 TEASER++ 粗配准和 GICP 精配准。默认全局粗配准配置：`fpfh_matching_mode: nearest`、最多 2000 对、`teaser_inlier_selection: pmc_exact`、最大团预算 30 秒；体素/法向/特征半径为 0.3/0.9/1.5 米。启动日志应显示该配置。后台求解可能较慢，前端继续运行。
 
 另一终端启动传感器或重新播放 `ros2 bag play "$BAG" --topics /velodyne_points /imu/data --rate 0.5`，查看状态：
 
@@ -245,12 +242,12 @@ python3 tools/glim2lio.py --dump "$OUT/merged_dump" --out "$OUT/merged_export" \
 
 ## 可选：jemalloc 内存分配器
 
-通过 CMake `if(SUPERLIO_USE_JEMALLOC)` 为 LIO、回环后端、重定位和独立 STD 节点直接链接 jemalloc。默认 `OFF`；安装开发库并重新编译即可启用：
+通过 CMake `WITH_JEMALLOC` 为 LIO、回环后端和重定位节点直接链接 jemalloc。默认 `OFF`；安装开发库并重新编译即可启用：
 
 ```bash
 sudo apt install libjemalloc-dev
 colcon build --packages-select super_lio_slam --symlink-install \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release -DSUPERLIO_USE_JEMALLOC=ON
+  --cmake-args -DCMAKE_BUILD_TYPE=Release -DWITH_JEMALLOC=ON
 source install/setup.bash
 ros2 launch super_lio_slam vlp32.launch.py
 ```
@@ -263,7 +260,7 @@ ros2 launch super_lio_slam vlp32.launch.py
 readelf -d install/super_lio_slam/lib/super_lio_slam/super_lio_node | grep jemalloc
 ```
 
-默认使用 jemalloc 自身配置。需要调节回收策略时，可在运行前设置 `export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:0"`。衰减参数控制空闲页回收时间；更积极的回收也可能增加 CPU 开销，见 [jemalloc 官方调优说明](https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md)。切回系统分配器需以 `-DSUPERLIO_USE_JEMALLOC=OFF` 重新编译。
+默认使用 jemalloc 自身配置。需要调节回收策略时，可在运行前设置 `export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:0"`。衰减参数控制空闲页回收时间；更积极的回收也可能增加 CPU 开销，见 [jemalloc 官方调优说明](https://github.com/jemalloc/jemalloc/blob/dev/TUNING.md)。切回系统分配器需以 `-DWITH_JEMALLOC=OFF` 重新编译。
 
 分配器不能释放仍被持有的关键帧、点云和位姿图。用同一数据集、相同参数和播放速度，分别运行关闭/开启 jemalloc 的构建，比对各算法进程峰值 RSS、退出前 RSS 和处理耗时，再判断收益。
 

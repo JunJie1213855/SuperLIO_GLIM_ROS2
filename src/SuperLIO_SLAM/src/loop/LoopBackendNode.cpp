@@ -55,36 +55,6 @@ namespace super_lio_slam
   LoopBackendNode::LoopBackendNode()
       : rclcpp::Node("loop_backend_node"), isam_(onlineGraphParameters())
   {
-    // STD uses its own contiguous index for descriptors and plane clouds. It is
-    // deliberately independent of the incoming ID so reconnects are harmless.
-    std_manager_.current_frame_id_ = 0;
-    read_parameters(*this, std_manager_.config_setting_);
-
-    const auto registration_mode = declare_parameter<std::string>("loop_registration_mode", "std_teaser_gicp");
-    const bool sc_registration = registration_mode == "sc_gicp" || registration_mode == "sc_teaser_gicp";
-    const bool teaser_mode = registration_mode == "std_teaser_gicp" || registration_mode == "sc_teaser_gicp";
-    if (!sc_registration && !teaser_mode && registration_mode != "std_gicp")
-      throw std::invalid_argument("loop_registration_mode must be std_gicp, std_teaser_gicp, sc_gicp or sc_teaser_gicp");
-    // 未指定新参数时兼容旧模式；显式开关只决定是否执行 FPFH/TEASER++ 粗配准。
-    rcl_interfaces::msg::ParameterDescriptor teaser_descriptor;
-    teaser_descriptor.read_only = true;
-    teaser_descriptor.description = "Enable loop FPFH/TEASER++ coarse registration; restart to compare";
-    use_teaser_ = declare_parameter<bool>("use_teaserpp", teaser_mode, teaser_descriptor);
-    use_submaps_ = teaser_mode || use_teaser_;
-#ifndef SUPERLIO_WITH_TEASER
-    if (use_teaser_)
-      throw std::invalid_argument("use_teaserpp=true requires a build with SUPERLIO_WITH_TEASER=ON");
-#endif
-    candidate_mode_ = declare_parameter<std::string>("loop_candidate_mode", "std");
-    if (candidate_mode_ != "distance" && candidate_mode_ != "std" && candidate_mode_ != "sc")
-      throw std::invalid_argument("loop_candidate_mode must be std, sc or distance");
-    if (sc_registration && candidate_mode_ != "sc")
-    {
-      // SC mode names select the descriptor even when launch supplies its default candidate mode.
-      set_parameter(rclcpp::Parameter("loop_candidate_mode", "sc"));
-      candidate_mode_ = "sc";
-    }
-
     // 辅助函数：返回大于 0 的值
     auto positive = [this](const char *name, double value)
     {
@@ -112,7 +82,7 @@ namespace super_lio_slam
     submap_limits_.max_duration = positive("registration_submap_max_duration_s", 6.0);
     submap_limits_.max_travel = positive("registration_submap_max_travel_distance_m", 6.0);
     source_window_ = SubmapWindow(submap_limits_);
-    registration_top_k_ = bounded("std_registration_top_k", 3, 1, 10);
+    registration_top_k_ = bounded("registration_top_k", 3, 1, 10);
     registration_budget_ms_ = positive("registration_soft_budget_ms", 500.0);
     registration_queue_capacity_ = bounded("registration_queue_capacity", 2, 1, 100);
 
@@ -122,29 +92,6 @@ namespace super_lio_slam
     settings.min_points = bounded("registration_min_points", 100, 30, 100000);
     settings.max_source = bounded("registration_max_source_points", 10000, 100, 100000);
     settings.max_target = bounded("registration_max_target_points", 50000, 100, 200000);
-    settings.normal_radius = positive("fpfh_normal_radius_m", 1.0);
-    settings.feature_radius = positive("fpfh_feature_radius_m", 2.5);
-    if (settings.feature_radius <= settings.normal_radius)
-      throw std::invalid_argument("FPFH feature radius must exceed normal radius");
-    settings.feature_ratio = positive("fpfh_distance_ratio_threshold", 0.9);
-    settings.hint_radius = positive("fpfh_pose_hint_radius_m", 3.0);
-    if (settings.feature_ratio > 1)
-      throw std::invalid_argument("FPFH distance ratio must be <= 1");
-    settings.min_pairs = bounded("correspondence_min_unique", 6, 3, 500);
-    settings.max_pairs = bounded("correspondence_max_unique", 200, 3, 500);
-    if (settings.min_pairs > settings.max_pairs)
-      throw std::invalid_argument("minimum pairs exceeds maximum");
-    settings.min_baseline = positive("correspondence_min_baseline_m", 2.0);
-    if (declare_parameter<bool>("teaser_estimate_scaling", false))
-      throw std::invalid_argument("LiDAR registration requires teaser_estimate_scaling=false");
-    settings.noise_bound = positive("teaser_noise_bound_m", 0.3);
-    settings.rotation_iterations = bounded("teaser_rotation_max_iterations", 100, 1, 1000);
-    settings.clique_seconds = positive("teaser_max_clique_time_limit_s", 0.05);
-    settings.threads = bounded("teaser_max_clique_num_threads", 2, 1, 16);
-    settings.coarse_radius = positive("coarse_residual_threshold_m", 0.6);
-    settings.coarse_min_inliers = bounded("coarse_min_inliers", 6, 3, 500);
-    settings.coarse_min_ratio = positive("coarse_min_inlier_ratio", 0.3);
-    settings.coarse_max_rmse = positive("coarse_max_inlier_rmse_m", 0.3);
     settings.max_iterations = bounded("gicp_max_iterations", 40, 1, 200);
     settings.covariance_neighbors = bounded("gicp_correspondence_randomness", 20, 4, 100);
     settings.correspondence_distance = positive("gicp_max_correspondence_distance_m", 2.0);
@@ -156,21 +103,19 @@ namespace super_lio_slam
     settings.min_information_ratio = positive("quality_min_information_ratio", 1e-5);
     settings.max_translation = positive("quality_max_refinement_translation_m", 5.0);
     settings.max_rotation_deg = positive("quality_max_refinement_rotation_deg", 20.0);
-    if (settings.coarse_min_ratio > 1 || settings.min_overlap >= 1 || settings.min_current_overlap >= 1)
-      throw std::invalid_argument("coarse inlier ratio must be <= 1; strict GICP overlap bounds must be < 1");
+    if (settings.min_overlap >= 1 || settings.min_current_overlap >= 1)
+      throw std::invalid_argument("strict GICP overlap bounds must be < 1");
 
     // 普通参数声明
     keyframe_cloud_voxel_size_ = declare_parameter<double>("keyframe_cloud_voxel_size", 0.25);
     keyframe_cloud_max_points_ = declare_parameter<int>("keyframe_cloud_max_points", 30000);
 
-    gicp_submap_half_width_ = bounded("gicp_submap_half_width", 5, 0, 100);
 
     // 回环的部分判决条件
     loop_min_interval_ = declare_parameter<int>("loop_min_interval", 20);
     loop_min_time_separation_s_ = declare_parameter<double>("loop_min_time_separation_s", 30.0);
     if (!std::isfinite(loop_min_time_separation_s_) || loop_min_time_separation_s_ < 0.0)
       throw std::invalid_argument("loop_min_time_separation_s must be finite and nonnegative");
-    loop_diagnostic_stride_ = declare_parameter<int>("loop_diagnostic_stride", 1);
     map_publish_stride_ = declare_parameter<int>("map_publish_stride", 30);
     map_max_keyframes_ = declare_parameter<int>("map_max_keyframes", 2000);
     map_max_points_per_keyframe_ =
@@ -184,8 +129,6 @@ namespace super_lio_slam
     if (!std::isfinite(save_map_voxel_size_) || save_map_voxel_size_ < 0)
       throw std::invalid_argument("save_map_voxel_size must be finite and nonnegative");
     path_max_poses_ = declare_parameter<int>("path_max_poses", 10000);
-    std_visualization_max_triangles_ =
-        declare_parameter<int>("std_visualization_max_triangles", 100);
     tf_publish_rate_hz_ = declare_parameter<double>("tf_publish_rate_hz", 20.0);
 
     // gtsam 回环优化中的先验信息
@@ -210,15 +153,13 @@ namespace super_lio_slam
     // 关键帧挑选
     keyframe_cloud_max_points_ = std::max(100, keyframe_cloud_max_points_);
     loop_min_interval_ = std::max(0, loop_min_interval_);
-    loop_diagnostic_stride_ = std::max(0, loop_diagnostic_stride_);
     map_publish_stride_ = std::max(1, map_publish_stride_);
     map_max_points_per_keyframe_ = std::max(1, map_max_points_per_keyframe_);
     path_max_poses_ = std::max(1, path_max_poses_);
-    std_visualization_max_triangles_ =
-        std::clamp(std_visualization_max_triangles_, 0, 1000);
     if (!std::isfinite(tf_publish_rate_hz_))
       tf_publish_rate_hz_ = 20.0;
-
+    
+    // QoS 协议 
     auto output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
 
     // 发布
@@ -227,12 +168,11 @@ namespace super_lio_slam
     map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/lio_slam/map", output_qos);
     marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
         "/lio_slam/loop_markers", output_qos);
-    std_marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
-        "/lio_slam/std_triangles", output_qos);
-    // tf 广播器和定时器
+    // tf 广播器
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
     tf_callback_group_ = create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive);
+    // 地图发布定时器
     tf_timer_ = create_wall_timer(
         std::chrono::milliseconds(static_cast<int>(1000.0 /
                                                    std::clamp(tf_publish_rate_hz_, 1.0, 100.0))),
@@ -255,12 +195,13 @@ namespace super_lio_slam
         "/lio/imu/odom", time_qos,
         std::bind(&LoopBackendNode::onFrontendOdometry, this, std::placeholders::_1),
         time_options);
+    
     // 关键帧订阅：重要
     keyframe_sub_ = create_subscription<super_lio_slam::msg::KeyFrame>(
         "/lio_slam/keyframe", rclcpp::QoS(rclcpp::KeepLast(200)).reliable(),
         std::bind(&LoopBackendNode::onKeyFrame, this, std::placeholders::_1));
-    // Same mutually-exclusive group as keyframe ingest: drain registration, then
-    // capture a consistent final graph. TF callbacks can continue independently.
+    
+    // 地图保存服务
     save_map_service_ = create_service<std_srvs::srv::Trigger>(
         "/lio_slam/save_optimized_map",
         [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
@@ -283,11 +224,9 @@ namespace super_lio_slam
       registration_thread_.join();
       throw;
     }
-    RCLCPP_INFO(get_logger(), "Loop backend ready: candidates=%s radius=%.1f m, mode=%s use_teaserpp=%s "
-                "clouds=%s registration=%s + iSAM2, async registration queue=%zu",
-                candidate_mode_.c_str(), candidate_radius_m_, registration_mode.c_str(),
-                use_teaser_ ? "true" : "false", use_submaps_ ? "multi_frame_submaps" : "legacy_single_frame",
-                use_teaser_ ? "TEASER/GICP" : "GICP", registration_queue_capacity_);
+    RCLCPP_INFO(get_logger(),
+                "Loop backend ready: Scan Context radius=%.1f m, multi-frame GICP + iSAM2, async registration queue=%zu",
+                candidate_radius_m_, registration_queue_capacity_);
   }
 
   gtsam::Pose3 LoopBackendNode::poseFromMsg(const geometry_msgs::msg::Pose &pose)
@@ -362,10 +301,13 @@ namespace super_lio_slam
   LoopBackendNode::CloudPtr LoopBackendNode::convertAndFilter(
       const sensor_msgs::msg::PointCloud2 &message) const
   {
+    // 转换为 pcl 的点云
     CloudPtr raw(new Cloud);
     pcl::fromROSMsg(message, *raw);
     CloudPtr finite(new Cloud);
     finite->reserve(raw->size());
+
+    // 检测数值有效性
     for (auto p : *raw)
     {
       if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z))
@@ -375,64 +317,15 @@ namespace super_lio_slam
         finite->push_back(p);
       }
     }
+
+    // 降采样
     return downsample(finite, keyframe_cloud_voxel_size_,
                       static_cast<std::size_t>(keyframe_cloud_max_points_));
   }
 
-  std::unique_ptr<LoopBackendNode::RegistrationObservation> LoopBackendNode::verifyWithGicp(
-      const CloudPtr &current_cloud, const CloudPtr &target, std::size_t current_index,
-      std::size_t historical_index,
-      const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &proposal,
-      const Eigen::Matrix4d *odom_hint) const
-  {
-    const auto &settings = registration_settings_;
-    const auto source = downsample(current_cloud, settings.voxel, settings.max_source);
-    RegistrationResult initial;
-    initial.accepted = true;
-    initial.transform.block<3, 3>(0, 0) = proposal.second;
-    initial.transform.block<3, 1>(0, 3) = proposal.first;
-    auto result = refineRegister(source, target, source, settings, initial);
-    const char *selected_hint = "proposal";
-    // Repeated structures can give STD a plausible but locally incorrect hint.
-    // Try the continuous odometry hint as well; both attempts use identical gates.
-    if (odom_hint && (*odom_hint - initial.transform).norm() > 1e-6)
-    {
-      initial.transform = *odom_hint;
-      const auto alternative = refineRegister(source, target, source, settings, initial);
-      RCLCPP_DEBUG(get_logger(), "GICP odometry attempt %zu -> %zu: stage=%s mse=%.4f overlap=%.3f",
-                   historical_index, current_index, decisionText(alternative.accepted, alternative.reason).c_str(), alternative.mse, alternative.overlap);
-      const auto cost = [&settings](const RegistrationResult &candidate)
-      {
-        // Penalize unmatched source points instead of rewarding a tiny good subset.
-        return candidate.overlap * candidate.mse +
-               (1.0 - candidate.overlap) * settings.quality_radius * settings.quality_radius;
-      };
-      if (alternative.accepted && (!result.accepted || cost(alternative) < cost(result)))
-      {
-        result = alternative;
-        selected_hint = "odom";
-      }
-    }
-    RCLCPP_INFO(get_logger(),
-                "GICP %zu -> %zu %s: initial=%s mse=%.4f m2 overlap=%.3f "
-                "current_overlap=%.3f inliers=%zu info_ratio=%.6f stage=%s",
-                historical_index, current_index,
-                decisionText(result.accepted, result.accepted ? "accepted" : "rejected").c_str(),
-                selected_hint, result.mse, result.overlap,
-                result.current_overlap, result.inliers, result.information_ratio,
-                decisionText(result.accepted, result.reason).c_str());
-    if (!result.accepted)
-      return nullptr;
-    auto observation = std::make_unique<RegistrationObservation>();
-    observation->historical_from_current = gtsam::Pose3(result.transform);
-    observation->fitness = result.mse;
-    observation->overlap = result.overlap;
-    return observation;
-  }
-
   std::unique_ptr<LoopBackendNode::RegistrationObservation> LoopBackendNode::verifySubmaps(
       const SubmapWindow &source_window, const SubmapWindow &target_window, const CloudPtr &current_cloud,
-      std::size_t historical_index, const Eigen::Matrix4d *hint) const
+      std::size_t historical_index, double scan_context_yaw) const
   {
     // 源子图锚定当前帧 C，目标子图锚定历史帧 H，各自内部用原始 LIO 相对位姿拼接。
     // 因此配准直接返回 T_H_C，无需在入图前额外乘锚点位姿。
@@ -448,39 +341,43 @@ namespace super_lio_slam
     const auto target = target_window.cloud(settings.voxel, settings.max_target);
     const auto current = downsample(current_cloud, settings.voxel, settings.max_source);
 
-    // 关闭粗配准时直接使用 T_H_C = T_W_H^-1 * T_W_C，不能误用其逆变换或单位阵。
+    // 两个初值都使用 H <- C。Scan Context 提供偏航角，LIO 提供平移和其余旋转分量。
     const Eigen::Matrix4d odom_initial = (target_window.entries().back().odom_pose.inverse() *
                                          source_window.entries().back().odom_pose).matrix();
-    const auto result = registerSubmaps(source, target, current, settings, use_teaser_, odom_initial, hint);
-    if (use_teaser_)
-      RCLCPP_INFO(get_logger(),
-                "Registration %zu -> %zu %s: coarse_inliers=%zu/%zu ratio=%.3f (min %.3f) "
-                "coarse_rmse=%s m (max %.3f) gicp=%s stage=%s",
+    Eigen::Matrix4d sc_initial = odom_initial;
+    const double odom_yaw = std::atan2(odom_initial(1, 0), odom_initial(0, 0));
+    sc_initial.block<3, 3>(0, 0) =
+        Eigen::AngleAxisd(scan_context_yaw - odom_yaw, Eigen::Vector3d::UnitZ()) *
+        odom_initial.block<3, 3>(0, 0);
+
+    const char *initial = "sc_yaw";
+
+    // 初次 gicp 精配准 -> 采用 scan context 记录的位姿作为初始化位姿
+    auto result = registerSubmaps(source, target, current, settings, sc_initial);
+
+    // 第二次 gicp 精配准 -> sc 位姿误差过大，采用 odom 位姿作为初始化位姿，再次尝试配准
+    if (!result.accepted && (sc_initial - odom_initial).norm() > 1e-6 &&
+        result.reason != "few_gicp_points")
+    {
+      RCLCPP_DEBUG(get_logger(), "GICP Scan Context initial guess rejected: %s", result.reason.c_str());
+      initial = "odom";
+      result = registerSubmaps(source, target, current, settings, odom_initial);
+    }
+
+    // 日志
+    RCLCPP_INFO(get_logger(),
+                "GICP %zu -> %zu %s: initial=%s mse=%.4f m2 overlap=%.3f "
+                "current_overlap=%.3f inliers=%zu info_ratio=%.6f fine_ms=%.1f stage=%s",
                 historical_index, source_window.entries().back().index,
                 decisionText(result.accepted, result.accepted ? "accepted" : "rejected").c_str(),
-                result.coarse_inliers, result.pairs,
-                result.pairs ? static_cast<double>(result.coarse_inliers) / result.pairs : 0.0,
-                settings.coarse_min_ratio,
-                result.coarse_inliers ? std::to_string(result.coarse_rmse).c_str() : "n/a",
-                settings.coarse_max_rmse, result.fine_ms > 0.0 ? "executed" : "skipped",
+                initial, result.mse, result.overlap, result.current_overlap, result.inliers,
+                result.information_ratio, result.fine_ms,
                 decisionText(result.accepted, result.reason).c_str());
-    else
-      RCLCPP_INFO(get_logger(),
-                  "Registration %zu -> %zu %s: use_teaserpp=false coarse=disabled initial=odom "
-                  "coarse_ms=%.1f fine_ms=%.1f stage=%s",
-                  historical_index, source_window.entries().back().index,
-                  decisionText(result.accepted, result.accepted ? "accepted" : "rejected").c_str(),
-                  result.coarse_ms, result.fine_ms, decisionText(result.accepted, result.reason).c_str());
-    if (result.fine_ms > 0.0)
-    {
-      RCLCPP_INFO(get_logger(),
-                  "GICP %zu -> %zu: mse=%.4f m2 overlap=%.3f current_overlap=%.3f "
-                  "inliers=%zu info_ratio=%.6f",
-                  historical_index, source_window.entries().back().index,
-                  result.mse, result.overlap, result.current_overlap, result.inliers, result.information_ratio);
-    }
+    
+    // 两次配准都不行，那就不能够成回环
     if (!result.accepted)
       return nullptr;
+    
     // 如果精配准可以接受，那么将其进行传出
     auto observation = std::make_unique<RegistrationObservation>();
     observation->historical_from_current = gtsam::Pose3(result.transform);
@@ -524,7 +421,7 @@ namespace super_lio_slam
       const super_lio_slam::msg::KeyFrame::SharedPtr msg)
   {
     // 阅读主线：预处理/候选召回 -> 关键帧入库及里程计因子 -> 异步几何验证 -> commitLoop。
-    // 本回调独占 STD 状态；重计算交给配准线程，关键帧和里程计边不能因配准排队而丢失。
+    // 本回调独占 Scan Context 历史；重计算交给配准线程，关键帧和里程计边不能因配准排队而丢失。
     if (backend_faulted_)
       return;
     if (have_input_id_ && msg->id <= last_input_id_)
@@ -538,6 +435,7 @@ namespace super_lio_slam
     CloudPtr cloud;
     try
     {
+      // 分别处理位姿和地图点云
       raw_pose = poseFromMsg(msg->odom_pose);
       cloud = convertAndFilter(msg->cloud); // 转换为 pcl 格式，并且降采样
     }
@@ -571,268 +469,108 @@ namespace super_lio_slam
                                                   static_cast<std::size_t>(loop_min_interval_);
     }
 
-    // 多帧回环流程独立维护窗口，关闭粗配准仍使用同一窗口；不是重定位的固定 S 系累积地图。
     auto pending_window = source_window_;
-    if (use_submaps_)
+    try
     {
-      try
-      {
-        pending_window.append({index, rclcpp::Time(msg->header.stamp).seconds(),
-                               Eigen::Isometry3d(raw_pose.matrix()), cloud});
-      }
-      catch (const std::exception &error)
-      {
-        RCLCPP_WARN(get_logger(), "Ignoring keyframe %u: %s", msg->id, error.what());
-        return;
-      }
+      pending_window.append({index, rclcpp::Time(msg->header.stamp).seconds(),
+                             Eigen::Isometry3d(raw_pose.matrix()), cloud});
+    }
+    catch (const std::exception &error)
+    {
+      RCLCPP_WARN(get_logger(), "Ignoring keyframe %u: %s", msg->id, error.what());
+      return;
     }
 
-    // 注册一个配准任务，让配准线程执行
+    // 配准任务
     RegistrationTask task;
     task.index = index;
     task.current_cloud = cloud;
     task.source_window = pending_window;
 
-    // STD 描述子，用于匹配
-    std::vector<STDesc> descriptors;
-    const auto plane_count = std_manager_.plane_cloud_vec_.size();
-    const auto corner_count = std_manager_.corner_cloud_vec_.size();
-    bool adding_descriptors = false;
-    double descriptor_ms = 0.0;
-    const auto std_begin = std::chrono::steady_clock::now();
-    // candidate_mode 只决定“找谁”；registration_mode 决定“如何验证”，二者独立配置。
-    if (candidate_mode_ != "std")
+    const auto descriptor_begin = std::chrono::steady_clock::now();
+
+    // scan context 处理
+    SCManager sc;
+    ScanContextDescriptor current_sc;
+    current_sc.context = sc.makeScancontext(*cloud);
+    current_sc.ring_key = sc.makeRingkeyFromScancontext(current_sc.context);
+    const auto descriptor_end = std::chrono::steady_clock::now();
+    if (enough_time_since_loop && current_sc.context.squaredNorm() > 0.0)
     {
-      const bool use_sc = candidate_mode_ == "sc";
-      SCManager sc;
-      ScanContextDescriptor current_sc;
-      if (use_sc)
+      struct RankedCandidate
       {
-        current_sc.context = sc.makeScancontext(*cloud);
-        current_sc.ring_key = sc.makeRingkeyFromScancontext(current_sc.context);
-        descriptor_ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - std_begin).count();
-      }
-      if (enough_time_since_loop && (!use_sc || current_sc.context.squaredNorm() > 0.0))
+        double score;
+        std::size_t historical;
+        double yaw = 0.0;
+      };
+      const auto rank_by_score = [](const RankedCandidate &a, const RankedCandidate &b)
       {
-        struct RankedCandidate
-        {
-          double score;
-          std::size_t historical;
-          double sc_yaw = 0.0;
-        };
-        const auto rank_by_score = [](const RankedCandidate &a, const RankedCandidate &b)
-        {
-          return std::pair{a.score, a.historical} < std::pair{b.score, b.historical};
-        };
-        std::vector<RankedCandidate> nearest;
-        {
-          std::lock_guard<std::mutex> lock(graph_mutex_);
-          for (std::size_t h = 0; h < index; ++h)
-          {
-            if (!loopCandidateEligible(msg->header.stamp, raw_pose, h))
-              continue;
-            if (use_sc && sc_history_[h].context.squaredNorm() == 0.0)
-              continue;
-            const double score = use_sc
-                ? (sc_history_[h].ring_key - current_sc.ring_key).squaredNorm()
-                : (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
-            nearest.push_back({score, h});
-          }
-        }
-        if (use_sc)
-        {
-          // Shortlist only eligible frames by ring key, then compare their polar contexts.
-          const auto count = std::min(nearest.size(), static_cast<std::size_t>(sc_candidate_count_));
-          std::partial_sort(nearest.begin(), nearest.begin() + count, nearest.end(), rank_by_score);
-          nearest.resize(count);
-          for (auto &candidate : nearest)
-          {
-            // The library shifts its second argument into the first, yielding H <- C.
-            const auto [distance, shift] = sc.distanceBtnScanContext(
-                sc_history_[candidate.historical].context, current_sc.context);
-            candidate.score = distance;
-            candidate.sc_yaw = shift * (2.0 * std::acos(-1.0) / sc.PC_NUM_SECTOR);
-          }
-          std::erase_if(nearest, [this](const RankedCandidate &candidate)
-                        { return !std::isfinite(candidate.score) || candidate.score >= sc_distance_threshold_; });
-        }
-        std::sort(nearest.begin(), nearest.end(), rank_by_score);
+        return std::pair{a.score, a.historical} < std::pair{b.score, b.historical};
+      };
+      std::vector<RankedCandidate> nearest;
+      {
         std::lock_guard<std::mutex> lock(graph_mutex_);
-        std::vector<std::size_t> selected;
-        for (const auto &[score, h, sc_yaw] : nearest)
+        // sc 循环匹配
+        for (std::size_t h = 0; h < index; ++h)
         {
-          if (selected.size() >= static_cast<std::size_t>(registration_top_k_)) // 有足够多的帧就跳出循环
-            break;
-          if (std::any_of(selected.begin(), selected.end(), [h](std::size_t previous)
-                          { return h > previous ? h - previous <= 2 : previous - h <= 2; }))
-            continue;
-          RegistrationCandidate match;
-          match.historical_index = h;
-          const auto proposal = frames_[h].odom_pose.between(raw_pose);
-          match.proposal = {proposal.translation(), proposal.rotation().matrix()};
-          match.have_pose_hint = true;
-          if (use_sc)
-          {
-            const auto &rotation = proposal.rotation().matrix();
-            const double odom_yaw = std::atan2(rotation(1, 0), rotation(0, 0));
-            match.proposal.second = Eigen::AngleAxisd(sc_yaw - odom_yaw, Eigen::Vector3d::UnitZ()) * rotation;
-            match.odom_hint = proposal.matrix();
-          }
-          if (use_submaps_)
-          {
-            match.target_window = SubmapWindow(submap_limits_); // 添加目标子图
-            const std::size_t first = h + 1 > static_cast<std::size_t>(submap_limits_.max_frames)
-                                          ? h + 1 - submap_limits_.max_frames
-                                          : 0;
-            for (std::size_t j = first; j <= h; ++j) // 添加多帧子图
-            {
-              const auto &frame = frames_[j];
-              match.target_window.append({j, rclcpp::Time(frame.stamp).seconds(),
-                                          Eigen::Isometry3d(frame.odom_pose.matrix()), frame.cloud});
-            }
-            if (pending_window.sharesFrames(match.target_window))
-              continue;
-          }
-          else
-          {
-            const auto half = static_cast<std::size_t>(std::max(0, gicp_submap_half_width_));
-            const auto first = h > half ? h - half : 0;
-            const auto last = std::min(index - 1, h + half);
-            match.local_anchor = frames_[h].odom_pose;
-            match.local_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
-          }
-          selected.push_back(h);
-          const double gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
-          if (use_sc)
-          {
-            RCLCPP_INFO(get_logger(),
-                        "SC %zu -> %zu matched: sc_distance=%.4f (< %.4f) yaw=%.1f deg time_gap=%.3f s distance=%.2f m",
-                        h, index, score, sc_distance_threshold_, sc_yaw * 180.0 / std::acos(-1.0),
-                        gap, proposal.translation().norm());
-          }
-          else
-          {
-            RCLCPP_DEBUG(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m time_gap=%.3f s",
-                         h, index, score, gap);
-          }
-          task.candidates.push_back(std::move(match));
+          if (loopCandidateEligible(msg->header.stamp, raw_pose, h) &&
+              sc_history_[h].context.squaredNorm() > 0.0)
+            nearest.push_back({(sc_history_[h].ring_key - current_sc.ring_key).squaredNorm(), h});
         }
       }
-      if (use_sc)
-        sc_history_.push_back(std::move(current_sc));
-    }
-    else // STD 描述子候选
-    {
-      try
+      const auto count = std::min(nearest.size(), static_cast<std::size_t>(sc_candidate_count_));
+
+      // 描述子距离排序
+      std::partial_sort(nearest.begin(), nearest.begin() + count, nearest.end(), rank_by_score);
+      nearest.resize(count);
+
+      // 候选帧查找
+      for (auto &candidate : nearest)
       {
-        // Only this callback owns STD state; workers consume immutable snapshots.
-        // 当前帧先生成描述子并查询历史库，搜索完成后才插入，避免把自身召回成回环。
-        std_manager_.GenerateSTDescs(cloud, descriptors); // 生成 STD 描述子
-        descriptor_ms = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - std_begin)
-                            .count();
-        if (enough_time_since_loop && !descriptors.empty())
-        {
-          if (use_submaps_)
-          {
-            // STD 在此只负责地点召回；时间/距离准入及 TEASER/GICP 验收通过后才形成回环边。
-            const auto candidates = std_manager_.SearchCandidates(descriptors); // 查看候选
-            std::vector<int> tried;
-            for (const auto &candidate : candidates)
-            {
-              const int h = candidate.match_id_.second;
-              if (h < 0 || static_cast<std::size_t>(h) >= index)
-                continue;
-              double candidate_distance;
-              double time_gap;
-              {
-                std::lock_guard<std::mutex> lock(graph_mutex_);
-                if (!loopCandidateEligible(msg->header.stamp, raw_pose, static_cast<std::size_t>(h))) // 时间检测
-                  continue;
-                candidate_distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
-                time_gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
-              }
-              if (std::any_of(tried.begin(), tried.end(), [h](int p)
-                              { return std::abs(p - h) <= 2; }))
-                continue;
-              if (tried.size() >= static_cast<std::size_t>(registration_top_k_))
-                break;
-              tried.push_back(h);
-              RegistrationCandidate match;
-              match.historical_index = static_cast<std::size_t>(h);
-              // STD retrieves places; a failed pose hint does not reject a candidate.
-              // 三角形一致性给出 T_H_C 初值；缺少可靠初值仍可让 TEASER 无提示尝试配准。
-              match.have_pose_hint = std_manager_.CandidatePoseHint(candidate, match.proposal);
-              // Snapshot raw poses/clouds briefly; assembling/downsampling is a worker task.
-              {
-                std::lock_guard<std::mutex> lock(graph_mutex_);
-                const std::size_t first = h + 1 > submap_limits_.max_frames ? h + 1 - submap_limits_.max_frames : 0;
-                match.target_window = SubmapWindow(submap_limits_);
-                for (std::size_t j = first; j <= match.historical_index; ++j)
-                {
-                  const auto &f = frames_[j];
-                  match.target_window.append({j, rclcpp::Time(f.stamp).seconds(),
-                                              Eigen::Isometry3d(f.odom_pose.matrix()), f.cloud});
-                }
-              }
-              if (pending_window.sharesFrames(match.target_window))
-                continue;
-              RCLCPP_INFO(get_logger(),
-                          "STD %d -> %zu matched: time_gap=%.3f s (> %.3f) distance=%.2f m (<= %.2f) hint=%s std_pairs=%zu",
-                          h, index, time_gap, loop_min_time_separation_s_, candidate_distance,
-                          candidate_radius_m_, match.have_pose_hint ? "STD" : "none", candidate.match_list_.size());
-              task.candidates.push_back(std::move(match)); // 添加配准任务
-            }
-          }
-          else if (!std_manager_.plane_cloud_vec_.empty() &&
-                   std_manager_.plane_cloud_vec_.back()->size() >= 3)
-          {
-            std::pair<int, double> result{-1, 0.0};
-            RegistrationCandidate match;
-            std::vector<std::pair<STDesc, STDesc>> pairs;
-            std_manager_.SearchLoop(descriptors, result, match.proposal, pairs, nullptr,
-                                    [this, &msg, &raw_pose](int historical)
-                                    {
-                                      std::lock_guard<std::mutex> lock(graph_mutex_);
-                                      return historical >= 0 && loopCandidateEligible(msg->header.stamp, raw_pose,
-                                                                                      static_cast<std::size_t>(historical));
-                                    });
-            if (result.first >= 0 && static_cast<std::size_t>(result.first) < index)
-            {
-              match.historical_index = static_cast<std::size_t>(result.first);
-              // Direct GICP targets are local snapshots, assembled by the worker.
-              const std::size_t half = static_cast<std::size_t>(std::max(0, gicp_submap_half_width_));
-              const std::size_t first = match.historical_index > half ? match.historical_index - half : 0;
-              const std::size_t last = std::min(index - 1, match.historical_index + half);
-              std::lock_guard<std::mutex> lock(graph_mutex_);
-              match.local_anchor = frames_[match.historical_index].odom_pose;
-              match.odom_hint = match.local_anchor.between(raw_pose).matrix();
-              match.local_frames.assign(frames_.begin() + first, frames_.begin() + last + 1);
-              RCLCPP_INFO(get_logger(), "STD %zu -> %zu matched: score=%.3f", match.historical_index, index, result.second);
-              task.candidates.push_back(std::move(match)); // 添加配准任务
-            }
-          }
-        }
-        adding_descriptors = true;
-        std_manager_.AddSTDescs(descriptors); // 把描述子添加到集合中
+        // Scan Context rotates its second argument into the first (H <- C).
+        const auto [distance, shift] = sc.distanceBtnScanContext(
+            sc_history_[candidate.historical].context, current_sc.context);
+        candidate.score = distance;
+        candidate.yaw = shift * (2.0 * std::acos(-1.0) / sc.PC_NUM_SECTOR);
       }
-      catch (const std::exception &error)
+      std::erase_if(nearest, [this](const RankedCandidate &candidate)
+                    { return !std::isfinite(candidate.score) || candidate.score >= sc_distance_threshold_; });
+      // 再次排序
+      std::sort(nearest.begin(), nearest.end(), rank_by_score);
+
+      std::lock_guard<std::mutex> lock(graph_mutex_);
+      for (const auto &[score, h, yaw] : nearest)
       {
-        RCLCPP_ERROR(get_logger(), "STD failed on keyframe %u: %s", msg->id, error.what());
-        if (adding_descriptors)
-          backend_faulted_ = true;
-        else
+        if (task.candidates.size() >= static_cast<std::size_t>(registration_top_k_))
+          break;
+        if (std::any_of(task.candidates.begin(), task.candidates.end(), [h](const auto &previous)
+                       {
+                         const auto p = previous.historical_index;
+                         return h > p ? h - p <= 2 : p - h <= 2;
+                       }))
+          continue;
+        SubmapWindow target_window(submap_limits_);
+        const auto max_frames = static_cast<std::size_t>(submap_limits_.max_frames);
+        const auto first = h + 1 > max_frames ? h + 1 - max_frames : 0;
+        for (std::size_t j = first; j <= h; ++j)
         {
-          std_manager_.plane_cloud_vec_.resize(plane_count);
-          std_manager_.corner_cloud_vec_.resize(corner_count);
+          const auto &frame = frames_[j];
+          target_window.append({j, rclcpp::Time(frame.stamp).seconds(),
+                                Eigen::Isometry3d(frame.odom_pose.matrix()), frame.cloud});
         }
-        return;
+        if (pending_window.sharesFrames(target_window))
+          continue;
+        task.candidates.push_back({h, std::move(target_window), yaw});
+        const double gap = (rclcpp::Time(msg->header.stamp) - rclcpp::Time(frames_[h].stamp)).seconds();
+        const double distance = (frames_[h].odom_pose.translation() - raw_pose.translation()).norm();
+        RCLCPP_INFO(get_logger(),
+                    "SC %zu -> %zu matched: sc_distance=%.4f (< %.4f) yaw=%.1f deg time_gap=%.3f s distance=%.2f m",
+                    h, index, score, sc_distance_threshold_, yaw * 180.0 / std::acos(-1.0), gap, distance);
       }
     }
-    const double std_ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - std_begin)
-                              .count();
+    const double descriptor_ms = std::chrono::duration<double, std::milli>(descriptor_end - descriptor_begin).count();
+    const double search_ms = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - descriptor_end).count();
     {
       std::lock_guard<std::mutex> lock(graph_mutex_);
 
@@ -848,7 +586,6 @@ namespace super_lio_slam
         // Every ingested keyframe receives an odometry factor, regardless of queue overload.
         addGraphNode(index, raw_pose); // 添加因子节点
         publishCurrent(index, false);
-        publishStdTriangles(index, descriptors);
       }
       catch (const std::exception &error)
       {
@@ -859,6 +596,7 @@ namespace super_lio_slam
     }
 
     // 至此图节点已初始化，后台延迟结果只需连接既有节点，不需要重新插入节点初值。
+    sc_history_.push_back(std::move(current_sc));
     source_window_ = std::move(pending_window);
     last_input_id_ = msg->id;
     have_input_id_ = true;
@@ -881,9 +619,9 @@ namespace super_lio_slam
         sensor_lag = (rclcpp::Time(*latest_data_stamp_) - rclcpp::Time(msg->header.stamp)).seconds();
     }
     RCLCPP_INFO_THROTTLE(get_logger(), diagnostics_clock_, 5000,
-                         "Backend timing input=%u frames=%zu filter=%.1f ms descriptor=%.1f ms search_verify_insert=%.1f ms "
+                         "Backend timing input=%u frames=%zu filter=%.1f ms descriptor=%.1f ms search=%.1f ms "
                          "ingest=%.1f ms sensor_lag=%.3f s registration_pending=%zu dropped_tasks=%zu",
-                         msg->id, index + 1, filter_ms, descriptor_ms, std_ms - descriptor_ms, total_ms, sensor_lag, queued, dropped);
+                         msg->id, index + 1, filter_ms, descriptor_ms, search_ms, total_ms, sensor_lag, queued, dropped);
   }
 
   void LoopBackendNode::publishCurrent(std::size_t index, bool loop_accepted)
@@ -996,77 +734,6 @@ namespace super_lio_slam
     output.header.stamp = snapshot.stamp;
     output.header.frame_id = "map";
     map_pub_->publish(output);
-  }
-
-  void LoopBackendNode::publishStdTriangles(
-      std::size_t index, const std::vector<STDesc> &descriptors)
-  {
-    using Marker = visualization_msgs::msg::Marker;
-    Marker edges;
-    edges.header.frame_id = "map";
-    edges.header.stamp = frames_[index].stamp;
-    edges.ns = "std_triangle_edges";
-    edges.id = 0;
-    edges.type = Marker::LINE_LIST;
-    edges.action = Marker::ADD;
-    edges.pose.orientation.w = 1.0;
-    edges.scale.x = 0.08;
-    edges.color.r = 0.1f;
-    edges.color.g = 0.7f;
-    edges.color.b = 1.0f;
-    edges.color.a = 0.9f;
-
-    Marker vertices = edges;
-    vertices.ns = "std_triangle_vertices";
-    vertices.type = Marker::SPHERE_LIST;
-    vertices.scale.x = vertices.scale.y = vertices.scale.z = 0.18;
-    vertices.color.r = 1.0f;
-    vertices.color.g = 0.9f;
-    vertices.color.b = 0.2f;
-
-    if (std_visualization_max_triangles_ > 0)
-    {
-      const std::size_t limit =
-          static_cast<std::size_t>(std_visualization_max_triangles_);
-      const std::size_t step = std::max<std::size_t>(
-          1, (descriptors.size() + limit - 1) / limit);
-      const auto &pose = frames_[index].map_pose;
-      for (std::size_t i = 0; i < descriptors.size(); i += step)
-      {
-        const auto &descriptor = descriptors[i];
-        const Eigen::Vector3d *local[3] = {
-            &descriptor.vertex_A_, &descriptor.vertex_B_, &descriptor.vertex_C_};
-        if (!local[0]->allFinite() || !local[1]->allFinite() ||
-            !local[2]->allFinite())
-          continue;
-        geometry_msgs::msg::Point corners[3];
-        for (int j = 0; j < 3; ++j)
-        {
-          const Eigen::Vector3d point =
-              pose.rotation().matrix() * *local[j] + pose.translation();
-          corners[j].x = point.x();
-          corners[j].y = point.y();
-          corners[j].z = point.z();
-          vertices.points.push_back(corners[j]);
-        }
-        for (int j = 0; j < 3; ++j)
-        {
-          edges.points.push_back(corners[j]);
-          edges.points.push_back(corners[(j + 1) % 3]);
-        }
-      }
-    }
-    // Reuse fixed marker IDs so each keyframe replaces the previous triangles.
-    // DELETE also clears an older display when this frame has no descriptors.
-    if (edges.points.empty())
-    {
-      edges.action = Marker::DELETE;
-      vertices.action = Marker::DELETE;
-    }
-    visualization_msgs::msg::MarkerArray markers;
-    markers.markers.push_back(std::move(edges));
-    markers.markers.push_back(std::move(vertices));
-    std_marker_pub_->publish(markers);
   }
 
   void LoopBackendNode::publishLoopMarkers(
@@ -1221,40 +888,9 @@ namespace super_lio_slam
                                task.index - last_loop_index_ < static_cast<std::size_t>(loop_min_interval_)))
               break;
           }
-          if (candidate_mode_ == "distance")
-            RCLCPP_INFO(get_logger(), "Distance candidate %zu -> %zu: distance=%.2f m; verifying registration",
-                        candidate.historical_index, task.index, candidate.proposal.first.norm());
-          std::unique_ptr<RegistrationObservation> observation;
-
-          // 多帧流程可选择 TEASER+GICP 或里程计初值+GICP；旧单帧模式保持兼容。
-          if (use_submaps_)
-          {
-            Eigen::Matrix4d hint = Eigen::Matrix4d::Identity();
-            hint.block<3, 3>(0, 0) = candidate.proposal.second;
-            hint.block<3, 1>(0, 3) = candidate.proposal.first;
-            // 以多帧图组成子地图进行匹配，获取观测
-            observation = verifySubmaps(task.source_window, candidate.target_window,
-                                        task.current_cloud, candidate.historical_index,
-                                        candidate.have_pose_hint ? &hint : nullptr);
-          }
-          else // 或者其他方法
-          {
-            CloudPtr merged(new Cloud);
-            const auto cap = std::max<std::size_t>(100,
-                                                   2 * registration_settings_.max_target / candidate.local_frames.size());
-            for (const auto &frame : candidate.local_frames)
-            {
-              Cloud transformed;
-              const auto local = downsample(frame.cloud, registration_settings_.voxel, cap);
-              pcl::transformPointCloud(*local, transformed,
-                                       candidate.local_anchor.between(frame.odom_pose).matrix().cast<float>().eval());
-              *merged += transformed;
-            }
-            const auto target = downsample(merged, registration_settings_.voxel, registration_settings_.max_target);
-            observation = verifyWithGicp(task.current_cloud, target, task.index,
-                                         candidate.historical_index, candidate.proposal,
-                                         candidate.odom_hint ? &*candidate.odom_hint : nullptr);
-          }
+          const auto observation = verifySubmaps(task.source_window, candidate.target_window,
+                                                 task.current_cloud, candidate.historical_index,
+                                                 candidate.scan_context_yaw);
 
           // 观测没有问题
           if (observation && !stopping_)
@@ -1265,7 +901,7 @@ namespace super_lio_slam
               commitLoop(task.index, candidate.historical_index, *observation);
             break;
           }
-          // 预算只在候选之间检查，无法硬中断正在执行的单次 TEASER/GICP 求解。
+          // 预算只在候选之间检查，无法硬中断正在执行的单次 GICP 求解。
           if (std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - begin)
                   .count() > registration_budget_ms_)
@@ -1360,9 +996,8 @@ namespace super_lio_slam
     }
     if (rclcpp::ok(get_node_base_interface()->get_context()))
       publishCurrent(latest, true);
-    RCLCPP_INFO(get_logger(), "Loop %zu -> %zu %s: %s mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
+    RCLCPP_INFO(get_logger(), "Loop %zu -> %zu %s: GICP mse %.4f overlap %.3f graph=%.1f ms latest=%zu",
                 historical, index, decisionText(true, "accepted").c_str(),
-                use_teaser_ ? "TEASER/GICP" : "GICP",
                 observation.fitness, observation.overlap, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count(), latest);
   }
 

@@ -296,16 +296,6 @@ Visualization Manager:
       Reliability Policy: Reliable
       Durability Policy: Transient Local
       History Policy: Keep Last
-  - Class: rviz_default_plugins/MarkerArray
-    Name: STD triangles (latest keyframe)
-    Enabled: true
-    Value: true
-    Topic:
-      Value: /lio_slam/std_triangles
-      Depth: 1
-      Reliability Policy: Reliable
-      Durability Policy: Transient Local
-      History Policy: Keep Last
   Enabled: true
   Global Options:
     Background Color: 36; 31; 49

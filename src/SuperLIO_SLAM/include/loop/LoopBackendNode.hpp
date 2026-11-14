@@ -27,7 +27,6 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include "STDesc.h"
 #include "loop/SubmapRegistration.hpp"
 #include "super_lio_slam/msg/key_frame.hpp"
 
@@ -67,12 +66,7 @@ namespace super_lio_slam
     {
       std::size_t historical_index = 0;
       SubmapWindow target_window;
-      std::vector<Frame> local_frames;
-      gtsam::Pose3 local_anchor;
-      std::pair<Eigen::Vector3d, Eigen::Matrix3d> proposal{
-          Eigen::Vector3d::Zero(), Eigen::Matrix3d::Identity()};
-      bool have_pose_hint = false;
-      std::optional<Eigen::Matrix4d> odom_hint;
+      double scan_context_yaw = 0.0;
     };
     struct RegistrationTask
     {
@@ -107,12 +101,6 @@ namespace super_lio_slam
     CloudPtr convertAndFilter(const sensor_msgs::msg::PointCloud2 &message) const;
     CloudPtr downsample(const CloudPtr &cloud, double voxel_size,
                         std::size_t max_points) const;
-    std::unique_ptr<RegistrationObservation> verifyWithGicp(
-        const CloudPtr &current_cloud, const CloudPtr &target, std::size_t current_index,
-        std::size_t historical_index,
-        const std::pair<Eigen::Vector3d, Eigen::Matrix3d> &proposal,
-        const Eigen::Matrix4d *odom_hint) const;
-
     void addGraphNode(std::size_t index, const gtsam::Pose3 &raw_pose);
     void publishCurrent(std::size_t index, bool loop_accepted);
     void publishMapToWorld();
@@ -121,26 +109,18 @@ namespace super_lio_slam
     void publishPath(const builtin_interfaces::msg::Time &stamp);
     void publishMap(const MapSnapshot &snapshot);
     void publishLoopMarkers(const builtin_interfaces::msg::Time &stamp);
-    void publishStdTriangles(std::size_t index,
-                             const std::vector<STDesc> &descriptors);
-
     static gtsam::Pose3 poseFromMsg(const geometry_msgs::msg::Pose &pose);
     static geometry_msgs::msg::Pose poseToMsg(const gtsam::Pose3 &pose);
 
     std::unique_ptr<RegistrationObservation> verifySubmaps(
         const SubmapWindow &source, const SubmapWindow &target, const CloudPtr &current_cloud,
-        std::size_t historical_index, const Eigen::Matrix4d *hint) const;
-    bool use_teaser_ = false;
-    // 多帧数据组织与粗配准开关分开，关闭 TEASER++ 不改变当前多帧对比条件。
-    bool use_submaps_ = false;
-    std::string candidate_mode_;
+        std::size_t historical_index, double scan_context_yaw) const;
     double candidate_radius_m_ = 15.0;
     SubmapLimits submap_limits_;
     SubmapWindow source_window_;
     RegistrationSettings registration_settings_;
     int registration_top_k_ = 3;
     double registration_budget_ms_ = 500.0;
-    STDescManager std_manager_;
     struct ScanContextDescriptor
     {
       Eigen::MatrixXd context;
@@ -178,7 +158,6 @@ namespace super_lio_slam
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr std_marker_pub_;
     // tf 定时器、广播器
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     rclcpp::CallbackGroup::SharedPtr tf_callback_group_;
@@ -186,16 +165,13 @@ namespace super_lio_slam
 
     double keyframe_cloud_voxel_size_ = 0.25;
     int keyframe_cloud_max_points_ = 30000;
-    int gicp_submap_half_width_ = 5;
     int loop_min_interval_ = 20;
     double loop_min_time_separation_s_ = 30.0;
-    int loop_diagnostic_stride_ = 1;
     int map_publish_stride_ = 30;
     int map_max_keyframes_ = 2000;
     int map_max_points_per_keyframe_ = 1000;
     double map_voxel_size_ = 0.5;
     int path_max_poses_ = 10000;
-    int std_visualization_max_triangles_ = 100;
     double tf_publish_rate_hz_ = 20.0;
     std::size_t last_loop_index_ = 0;
     bool have_loop_ = false;

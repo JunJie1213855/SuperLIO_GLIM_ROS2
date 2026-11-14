@@ -67,18 +67,18 @@ int main() {
     RegistrationResult initial;
     initial.accepted=true;
     initial.transform=pose(.30,.9,-.3).matrix();
-    // 新开关必须绕过 FPFH/粗配准门限，即使这些门限绝不可能通过，也应直接执行 GICP。
+    // 直接 GICP 使用传入的初值，并按精配准独立门限验收。
     auto direct_settings=settings;
     direct_settings.coarse_min_inliers=1000000;
     direct_settings.coarse_min_ratio=1.01;
-    const auto direct=registerSubmaps(src,dst,source,direct_settings,false,initial.transform);
+    const auto direct=registerSubmaps(src,dst,source,direct_settings,initial.transform);
     require(direct.accepted,"direct GICP known transform rejected");
     require((direct.transform-truth.matrix()).norm()<.12,"direct GICP transform direction");
     require(direct.pairs==0 && direct.coarse_inliers==0 && direct.coarse_ms==0.0 && direct.fine_ms>0.0,
             "disabled coarse registration still generated features or ran TEASER");
     auto boundary_settings=settings;
     boundary_settings.max_mse=direct.mse;
-    const auto equal_mse=registerSubmaps(src,dst,source,boundary_settings,false,initial.transform);
+    const auto equal_mse=registerSubmaps(src,dst,source,boundary_settings,initial.transform);
     require(!equal_mse.accepted && equal_mse.reason=="high_inlier_mse",
             "MSE equal to the strict upper bound accepted");
     boundary_settings.max_mse=std::nextafter(direct.mse,std::numeric_limits<double>::infinity());
@@ -104,7 +104,7 @@ int main() {
             "current-frame coverage equal to 80% accepted");
     auto bad_initial=initial;
     bad_initial.transform(0,0)=2;
-    const auto invalid_hint=registerSubmaps(src,dst,source,settings,false,bad_initial.transform);
+    const auto invalid_hint=registerSubmaps(src,dst,source,settings,bad_initial.transform);
     require(!invalid_hint.accepted && invalid_hint.reason=="invalid_initial_transform",
             "invalid GICP initial transform accepted");
     require(!refineRegister(one(0),one(0),one(0),settings,initial).accepted,
@@ -120,13 +120,11 @@ int main() {
     const auto rejected_coarse=coarseRegister(src,dst,strict_settings);
     require(!rejected_coarse.accepted && rejected_coarse.reason=="coarse_rmse_exceeded",
             "coarse RMSE gate did not reject inaccurate registration");
-    // 开启时必须实际通过粗配准取得初值，不能误用这里故意设置的错误里程计初值。
-    const auto unrelated_odom=pose(1.5,20,-20).matrix();
-    auto fine=registerSubmaps(src,dst,source,settings,true,unrelated_odom);
+    auto fine=refineRegister(src,dst,source,settings,coarse);
     std::cout<<"fine "<<fine.reason<<" mse="<<fine.mse<<" overlap="<<fine.overlap<<std::endl;
     require(fine.accepted,"GICP known transform rejected");
     require(fine.pairs>=static_cast<std::size_t>(settings.min_pairs) && fine.coarse_ms>0.0,
-            "enabled coarse registration was skipped");
+            "refinement did not retain coarse registration metrics");
     require((fine.transform-truth.matrix()).norm()<.12,"incorrect full registration transform");
     require(!coarseRegister(one(0),one(0),settings).accepted,"sparse coarse input accepted");
     auto global_settings=settings;

@@ -69,6 +69,7 @@ namespace LI2Sup
     std::size_t local_frame_count_ = 0;
     std::mutex registration_mutex_;
     std::condition_variable registration_cv_;
+    
     // 前台只保留一个最新待处理快照，后台只运行一个任务，避免慢配准积累无限队列。
     std::optional<super_lio_slam::RelocationSnapshot> pending_task_;
     std::optional<super_lio_slam::RelocationResult> pending_result_;

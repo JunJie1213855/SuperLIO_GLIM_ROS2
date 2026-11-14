@@ -1,15 +1,15 @@
 # SuperLIO SLAM
 
-ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。完整运行命令见 [Quickstart](../../docs/quickstart.md)，项目概览见[工作区 README](../../README.md)。
+ROS 2 LiDAR / IMU 前端、Scan Context 回环后端与运动补偿重定位。完整运行命令见 [Quickstart](../../docs/quickstart.md)，项目概览见[工作区 README](../../README.md)。
 
 ## 当前实现
 
-- 回环默认使用 **STD → 时间/距离筛选 → 多帧 FPFH / TEASER++ → GICP → iSAM2**；普通 ICP 已移除，直接 GICP 保留为对照。
-- 关键帧/STD、异步配准、地图重建分开执行。队列过载只淘汰旧检测任务，不删除关键帧和图节点；地图请求合并为最新快照。
+- 回环使用 **时间与距离筛选 → Scan Context 匹配 → 多帧子图 GICP → iSAM2**。
+- 关键帧/描述子检索、异步配准、地图重建分开执行。队列过载只淘汰旧检测任务，不删除关键帧和图节点；地图请求合并为最新快照。
 - 重定位直接配准固定 S 系累积局部地图快照，不使用滑动窗口，配准后变换最新 KF 状态和协方差，切换世界参考地图。
 - 点云、位姿、关键帧和 TF 保留传感器时间。默认无需 `/clock`，旧时间对齐参数弃用并忽略。
-- 扫描滤波支持 `fixed`（默认）与 `adaptive`（GenZ-LIO 尺度感知 PD，观测 d / 入图 d/2）；普通建图和重定位共用实现，详见[原理与参数](../../docs/genz_adaptive_voxel_plan.md)。
-- 室内/室外配准 YAML 独立；建图 RViz 使用 GenZ-LIO 风格的白色累积地图背景（透明度 0.2、1 像素），当前帧实际参与点到面更新的点为蓝色；LIO 和重定位均只采用点到面观测。残差直方图与统计见[诊断说明](../../docs/observation_diagnostics.md)。
+- 扫描滤波支持 `fixed`（默认）与 `adaptive`（GenZ-LIO 尺度感知 PD，观测 d / 入图 d/2）；普通建图和重定位共用实现。
+- 室内/室外配准 YAML 独立；建图 RViz 使用 GenZ-LIO 风格的白色累积地图背景（透明度 0.2、1 像素），当前帧实际参与点到面更新的点为蓝色；LIO 和重定位均只采用点到面观测。残差和观测统计见下方话题表。
 - 日志对 `accepted` / `rejected` 和最终 `stage` 理由使用绿/红色，数值保持原色。
 
 ## 构建
@@ -17,9 +17,9 @@ ROS 2 LiDAR / IMU 前端、STD 回环后端与运动补偿重定位。完整运�
 在工作区根目录执行：
 
 ```bash
-cd /home/ros/ros_ws/SuperLIO_GLIM_ROS2
+cd /home/ros/rosws/SuperLIO_GLIM_ROS2
 source /opt/ros/humble/setup.bash
-source /home/ros/ros_ws/livox_ros/install/setup.bash
+source /home/ros/rosws/livox_ros_ws/install/setup.bash
 git submodule update --init --recursive
 python3 tools/build_teaserpp.py --jobs 1
 
@@ -31,28 +31,29 @@ source install/setup.bash
 
 构建助手按脚本位置定位工作区，在 `build/teaserpp_vendor` 缓存固定版本源码，安装到 `install/teaserpp`；
 完整缓存可使用 `--offline`。缺少 `teaserppConfig.cmake` 时先运行该助手。
-关闭 TEASER++ 的构建可使用 `use_teaserpp:=false`（保留多帧窗口）或旧 `std_gicp` / `sc_gicp`，不支持 TEASER++ 回环或当前重定位流程。
+仅建图和回环时可以跳过 TEASER++ 安装，使用 `-DSUPERLIO_WITH_TEASER=OFF` 构建。参考地图重定位需使用 ON。
 
 ## 启动与配置
 
-配置按用途分组，文件名和参数值保持不变：
+配置按用途分组。
 
 | 目录 | 配置内容 |
 |---|---|
 | `config/common/` | 各传感器的话题、字段、外参及前端参数，如 `robosense_airy.yaml`、`unitree_l1.yaml`、`vlp32.yaml` |
-| `config/loop/` | `slam.yaml`、`unitree_slam.yaml`、`std_extract.yaml` 及 `loop_*_teaser_gicp.yaml`，管理关键帧、STD、图优化和回环配准门限 |
+| `config/loop/` | `slam.yaml`、`unitree_slam.yaml` 及 `loop*gicp.yaml`，管理关键帧、Scan Context、图优化和回环配准门限 |
 | `config/relocation/` | `relocation.yaml`，管理重定位流程和配准门限 |
 
-启动入口自动使用新路径，原来的 launch 命令不变。显式传入 `sensor_config`、`slam_config`、`registration_config`、`std_config` 或 `relocation_config` 时，需使用相应子目录下的路径。安装后的 `share/super_lio_slam/config/` 采用相同布局；构建生成的 `runtime_library_dirs.txt` 保留在 `config/` 根目录。
+各传感器入口自动选择对应的 GICP 配置。显式传入 `sensor_config`、`slam_config`、`registration_config` 或 `relocation_config` 时，需使用相应子目录下的路径。安装后的 `share/super_lio_slam/config/` 采用相同布局；构建生成的 `loop_runtime_library_dirs.txt` 和重定位用的 `runtime_library_dirs.txt` 保留在 `config/` 根目录。
 
 各终端先加载上述 ROS 和工作区环境，使用相同 DDS 配置；每个 bag 会话单独启动算法。
 
 | 入口 | 传感器配置（相对 `config/`） | 默认配准配置（相对 `config/`） |
 |---|---|---|
-| `unitree_slam.launch.py` | `common/unitree_l1.yaml` | `loop/loop_indoor_teaser_gicp.yaml` |
-| `robosense_airy.launch.py` | `common/robosense_airy.yaml` | `loop/loop_indoor_teaser_gicp.yaml` |
-| `vlp32.launch.py` | `common/vlp32.yaml` | `loop/loop_outdoor_teaser_gicp.yaml` |
-| `Livox_mid360.launch.py` / `slam.launch.py` | `common/livox_360.yaml` | `loop/loop_teaser_gicp.yaml` |
+| `unitree_slam.launch.py` | `common/unitree_l1.yaml` | `loop/loop_indoor_gicp.yaml` |
+| `robosense_airy.launch.py` | `common/robosense_airy.yaml` | `loop/loop_indoor_gicp.yaml` |
+| `vlp32.launch.py` | `common/vlp32.yaml` | `loop/loop_outdoor_gicp.yaml` |
+| `s3e.launch.py` | `common/s3e.yaml` | `loop/loop_outdoor_gicp.yaml` |
+| `Livox_mid360.launch.py` / `slam.launch.py` | `common/livox_360.yaml` | `loop/loop_gicp.yaml` |
 
 ```bash
 ros2 launch super_lio_slam robosense_airy.launch.py rviz:=true
@@ -64,91 +65,49 @@ ros2 bag play /mnt/d/dataset/SLAM/robosense/mapping
 |---|---|
 | `sensor_config` | 话题、点云字段/单位、外参、前端参数 |
 | `downsample_mode` | `fixed` / `adaptive`；未指定时读取 YAML 的 `lio.downsample.mode`（默认 fixed），切换需重启 |
-| `slam_config` | 关键帧、STD、图优化与地图发布；Unitree 使用 `unitree_slam.yaml` |
-| `registration_config` | TEASER++、GICP 和接受门限；可覆盖入口默认配置 |
+| `slam_config` | 关键帧、Scan Context、图优化与地图发布；Unitree 使用 `unitree_slam.yaml` |
+| `registration_config` | 多帧子图、GICP 和接受门限；可覆盖入口默认配置 |
 | `enable_loop_backend` | 默认 true；false 同时关闭后端与关键帧发布 |
-| `loop_candidate_mode` | `std`（默认）、`sc`（Scan Context）或 `distance` |
-| `loop_registration_mode` | `std_teaser_gicp`（默认）、`std_gicp`、`sc_teaser_gicp` 或 `sc_gicp` |
-| `use_teaserpp` | 回环粗配准开关，`true` / `false`；未指定时沿用 YAML 或模式默认值；启动时读取，修改需重启 |
-| `loop_candidate_radius_m` | 各候选模式的原始里程计距离门限，默认 15 m |
+| `loop_candidate_radius_m` | Scan Context 候选的原始里程计距离门限，默认 15 m |
 | `use_sim_time` | 默认 false；需要 ROS 仿真时间时仍可与播放器 `--clock` 配套使用 |
 | `rviz` / `rviz_config` | 是否启动及显示配置；关闭后端时自动选择 `lio.rviz` |
 | `save_map_path` | 服务与退出保存的优化地图 PCD 路径 |
 | `save_map_voxel_size` | 保存体素大小，默认 0.2 m；0 逐点流式写入 |
 | `save_map_on_shutdown` | 正常退出自动保存；默认 false |
 
-### 回环候选与配准组合
+### 在线回环
 
 ```bash
-# STD + TEASER++ + GICP（默认）
-ros2 launch super_lio_slam unitree_slam.launch.py \
-  loop_candidate_mode:=std loop_registration_mode:=std_teaser_gicp rviz:=true
-# Scan Context + TEASER++ + GICP
-ros2 launch super_lio_slam unitree_slam.launch.py \
-  loop_registration_mode:=sc_teaser_gicp rviz:=true
-# Scan Context + 直接 GICP
-ros2 launch super_lio_slam unitree_slam.launch.py \
-  loop_registration_mode:=sc_gicp rviz:=true
-# 距离检索 + TEASER++ + GICP
-ros2 launch super_lio_slam unitree_slam.launch.py \
-  loop_candidate_mode:=distance loop_registration_mode:=std_teaser_gicp rviz:=true
-# STD + 直接 GICP
-ros2 launch super_lio_slam unitree_slam.launch.py \
-  loop_candidate_mode:=std loop_registration_mode:=std_gicp rviz:=true
-# 距离检索 + 直接 GICP
-ros2 launch super_lio_slam unitree_slam.launch.py \
-  loop_candidate_mode:=distance loop_registration_mode:=std_gicp rviz:=true
+ros2 launch super_lio_slam unitree_slam.launch.py rviz:=true
 ```
 
-`sc_teaser_gicp` 和 `sc_gicp` 自动选择 SC 候选，优先于 `loop_candidate_mode`。原有 `std_*` 模式继续按 `loop_candidate_mode` 选择候选。`loop_distance_teaser_gicp.yaml` 只是显式选择的实验配置，不会自动启用距离检索。
-三种检索均要求传感器时间差 **>30 s**、原始里程计距离 **≤15 m**；
-还受关键帧冷却及源/目标子图不共享成员的限制。
-
-SC 复用 `SC/cpp/module/Scancontext` 的 20 环 × 60 扇区高度描述子（半径 80 m）。在满足时间和空间门限的历史关键帧中，按 ring key 取最近的 `sc_candidate_count` 帧（默认 10），再保留 SC 距离小于 `sc_distance_threshold`（默认 0.13）的候选，按距离从小到大提交几何验证。参数位于 `config/loop/slam.yaml` 和 `config/loop/unitree_slam.yaml`。SC 提供历史帧 ← 当前帧的相对航向，平移及俯仰、横滚沿用里程计初值。日志 `SC ... matched` 表示通过候选筛选，闭环以几何验收和入图日志为准。
-
-STD 位姿提示是可选初值，提示失败后可重试无提示粗配准。源/目标子图分别在锚帧下按位姿累积，GICP 返回将当前帧点变换到历史帧的完整相对变换供 iSAM2 使用；坐标方向见[配准推导](../../docs/loop_pgo_path.md)。
-
-### 仅关闭 TEASER++ 的对比
-
-保持 `loop_registration_mode:=std_teaser_gicp`（或 `sc_teaser_gicp`），只改变 `use_teaserpp`：
+也可以分开启动两个节点。例如 Robosense Airy 在两个终端分别运行以下命令：
 
 ```bash
-# 开启：多帧 FPFH / TEASER++ -> GICP -> 相同质量检查 -> iSAM2
-ros2 launch super_lio_slam vlp32.launch.py use_teaserpp:=true rviz:=true
-# 关闭：同一多帧子图，LIO 相对位姿初值 -> GICP -> 相同质量检查 -> iSAM2
-ros2 launch super_lio_slam vlp32.launch.py use_teaserpp:=false rviz:=true
-
-# 独立后端（需另启 LIO 并打开关键帧发布）
-ros2 launch super_lio_slam loop_backend.launch.py use_teaserpp:=false
-# tmux 建图脚本：默认 true，可直接修改脚本开头的 USE_TEASERPP
-USE_TEASERPP=false ./scripts/start_mapping.sh slam
+ros2 launch super_lio_slam lio.launch.py publish_keyframes:=true
+ros2 launch super_lio_slam loop_backend.launch.py \
+  registration_config:="$(ros2 pkg prefix --share super_lio_slam)/config/loop/loop_indoor_gicp.yaml"
 ```
 
-也可在 `slam_config` 的 `loop_backend_node.ros__parameters` 下设置 `use_teaserpp: false`。显式 launch 参数优先；tmux 脚本会显式传递 `USE_TEASERPP`，不读取 YAML 中的同名开关。该参数只读，不支持运行中热切换。
+Scan Context 使用 20 环 × 60 扇区的高度描述子，半径 80 m。历史关键帧先通过传感器时间差 **>30 s** 和原始里程计距离 **≤15 m** 的筛选。再按 ring key 取最近的 10 帧，保留 SC 距离 **<0.13** 的候选，每个任务最多验证 3 个。`sc_candidate_count` 和 `sc_distance_threshold` 位于 `slam_config`，`registration_top_k` 位于 `registration_config`。旧启动参数和配置文件的替换方式见 [Quickstart](../../docs/quickstart.md#旧版命令迁移)。
 
-关闭时不提取 FPFH、不运行 TEASER++，不执行粗配准内点/RMSE 门限。以 `T_H_C = T_W_H^-1 * T_W_C` 初始化 GICP，不使用描述子提示覆盖里程计初值。时间/距离候选筛选、源/目标窗口、降采样、GICP、当前帧覆盖率、MSE、几何退化、细化修正及 PGO 门限均保持。重定位的全局粗配准不受此开关影响。
-
-旧 `std_gicp` / `sc_gicp` 在未显式开启开关时仍使用单帧对历史局部子图，不作为仅移除 TEASER++ 的严格对照。显式 `use_teaserpp=true` 则启用多帧粗/精配准。启动日志显示实际 `use_teaserpp` 和 `clouds`；关闭时配准日志显示 `coarse=disabled initial=odom` 及粗/精耗时。每组重启节点，从同一 bag 起点、相同播放速率开始，比较接受回环数、配准耗时和最终地图。
+源与目标子图分别在当前和历史关键帧坐标系中累积，默认各最多 4 帧、6 秒、6 米。GICP 初值采用 Scan Context 的相对偏航角和 LIO 的平移、俯仰及横滚。初值不同且首次验证失败时，可用原始 LIO 相对位姿重试。点数不足时直接拒绝候选。验收通过后的历史帧 ← 当前帧变换作为 iSAM2 回环约束。
 
 ### 配准门限
 
-| 参数 | 室内 | 室外 |
-|---|---:|---:|
-| `registration_voxel_size_m` | 0.3 | 0.5 |
-| `coarse_min_inliers` | 3 | 10 |
-| `coarse_min_inlier_ratio` | 0.1 | 0.15 |
-| `coarse_max_inlier_rmse_m` | 0.4 | 0.4 |
-| `quality_min_source_overlap` | 0.9 | 0.9 |
-| `quality_min_current_frame_overlap` | 0.9 | 0.9 |
-| `quality_max_inlier_mse_m2` | 0.05 | 0.1 |
+| 参数 | 通用 | 室内 | 室外 |
+|---|---:|---:|---:|
+| `registration_voxel_size_m` | 0.5 | 0.3 | 0.5 |
+| `quality_min_source_overlap` | 0.8 | 0.9 | 0.9 |
+| `quality_min_current_frame_overlap` | 0.8 | 0.9 | 0.9 |
+| `quality_max_inlier_mse_m2` | 0.10 | 0.10 | 0.15 |
 
-粗配准 RMSE 单位为 m，GICP 内点 MSE 单位为 m²，`RMSE = sqrt(MSE)`。
+GICP 内点 MSE 单位为 m²，`RMSE = sqrt(MSE)`。
 覆盖率按质量半径内的最近邻内点占比计算，子图和当前帧分别检查。
-GICP 的覆盖率必须严格大于下限，MSE 必须严格小于上限；没有独立的“分数 >0.8”条件。
+GICP 的覆盖率必须严格大于下限，MSE 必须严格小于上限。
 阈值以所选 YAML 为准，重定位使用独立配置。
 
 共享检查还包括至少 100 个 GICP 内点、有效刚体变换、收敛、精修幅度和信息特征值比。
-STD 内部保留的 `icp_threshold` 是历史命名的平面评分参数，不代表启用普通 ICP。
 
 ## 坐标系与时间
 
@@ -187,7 +146,7 @@ launch 为后端预留 120 秒再升级退出信号，大地图优先在退出�
 
 ```bash
 ros2 launch super_lio_slam relocation.launch.py \
-  sensor_config:=/home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/common/robosense_airy.yaml \
+  sensor_config:=/home/ros/rosws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/common/robosense_airy.yaml \
   map_path:=/absolute/path/to/reference_map.pcd rviz:=true
 ```
 
@@ -207,7 +166,7 @@ ros2 launch super_lio_slam relocation.launch.py \
 | `teaser_max_clique_time_limit_s` | 30 s，仅为最大团阶段预算，不是整个任务耗时上限 |
 | `teaser_rotation_gnc_factor` / `teaser_rotation_cost_threshold` | 1.4 / 0.0001 |
 
-`mutual_ratio` 可恢复原匹配筛选；nearest 模式不做比率、双向一致性或位姿半径筛选，先验仍可用于地图裁剪与坐标变换。点云、粗内点与 GICP/最新扫描质量验收仍然执行。在线回环保持原有 mutual_ratio、200 对与启发式最大团配置。
+`mutual_ratio` 可恢复原匹配筛选；nearest 模式不做比率、双向一致性或位姿半径筛选，先验仍可用于地图裁剪与坐标变换。点云、粗内点与 GICP/最新扫描质量验收仍然执行。
 
 无需 ROS/DDS 可复现生产粗配准函数的离线对照：
 
@@ -244,23 +203,22 @@ build/super_lio_slam/relocation_pcd_check reference_map_local.pcd data/reference
 | `/lio/odom`、`/lio/imu/odom` | 扫描更新 / IMU 预测的位姿；建图时为 world |
 | `/lio/cloud_world` | 当前扫描；`lio.output.dense=false` 使用体素滤波结果 |
 | `/lio/cloud_world_dense` | `lio.output.dense=true` 时的完整去畸变扫描 |
+| `/lio/observation/points` | 蓝色点到面观测，含更新前的 `residual` 和更新后的 `residual_after` |
+| `/lio/observation/metrics` | 观测点数、体素尺度、位姿修正等统计 |
 | `/lio_slam/keyframe` | `KeyFrame`：原始 world→IMU 位姿及 IMU 系扫描 |
 | `/lio_slam/odom`、`/lio_slam/path`、`/lio_slam/map` | map 系优化输出 |
-| `/lio_slam/loop_markers`、`/lio_slam/std_triangles` | 已接受回环 / 当前关键帧 STD 可视化 |
+| `/lio_slam/loop_markers` | 已接受回环 |
 
 Robosense 默认显示滤波后的当前扫描。优化地图由 `map_voxel_size`、`map_max_points_per_keyframe`
 及 `map_publish_stride` 独立控制，发布周期按关键帧数计算，不是扫描频率。
 `map_max_keyframes` 只限制重建范围，不会清理全部历史检索数据。
 
-`std_pairs` 是 STD 三角形匹配对数，`coarse_inliers=N/M` 的分母是 FPFH 对应数。
+日志 `SC ... matched` 表示通过候选筛选。GICP 日志包含初值来源、内点 MSE、子图覆盖率、当前帧覆盖率和验收结果。
 `sensor_lag` 是最新前端数据时间减当前关键帧时间；配准耗时查看 `Registration timing`。
 接受/拒绝和末尾 `stage` 理由着色；未执行的后续质量检查可能保留零值，不应当作实际测量。
 
 | 常见拒绝理由 | 含义 |
 |---|---|
-| `few_coarse_inliers` | 粗配准内点数或比例不足 |
-| `coarse_rmse_exceeded` | 粗配准 RMSE 超限 |
-| `degenerate_coarse_inliers` | 粗内点空间跨度不足或近共线 |
 | `excessive_refinement` | GICP 相对初值的平移或旋转修正超限 |
 | `low_overlap` | 质量内点数或子图/当前帧覆盖率不足 |
 | `high_inlier_mse` | GICP 内点 MSE 超限 |
@@ -275,7 +233,7 @@ Robosense 默认显示滤波后的当前扫描。优化地图由 `map_voxel_size
 
 ### GTSAM runtime isolation
 
-CMake 记录实际选定的 GTSAM / TEASER++ 库目录，SLAM 后端和重定位 launch 自动应用。
+回环 launch 读取构建时选定的 GTSAM 库目录。重定位 launch 还加载构建时选定的 TEASER++ 库目录。
 直接执行测试程序时先加载工作区，并使用相同库路径：
 
 ```bash

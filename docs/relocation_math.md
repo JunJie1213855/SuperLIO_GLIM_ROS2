@@ -904,7 +904,7 @@ $$
 | 配准快照与结果定义 | [RelocationRegistration.h](../src/SuperLIO_SLAM/include/lio/RelocationRegistration.h) |
 | 误差状态排列与 18×18 协方差 | [ESKF.h](../src/SuperLIO_SLAM/include/lio/ESKF.h) |
 | ChangeReferenceFrame()、状态注入、传播缓存 | [ESKF.cpp](../src/SuperLIO_SLAM/src/lio/ESKF.cpp) |
-| 粗配准与几何内点检查 | [TeaserCoarseRegistration.cpp](../src/SuperLIO_SLAM/src/loop/TeaserCoarseRegistration.cpp) |
+| 粗配准与几何内点检查 | [TeaserCoarseRegistration.cpp](../src/SuperLIO_SLAM/src/lio/TeaserCoarseRegistration.cpp) |
 | 精配准、覆盖率、MSE 和退化诊断 | [GicpRegistration.cpp](../src/SuperLIO_SLAM/src/loop/GicpRegistration.cpp) |
 | 点云、位姿、TF 和参考系切换 | [ROSWrapper.cpp](../src/SuperLIO_SLAM/src/ros/ROSWrapper.cpp) |
 | 启动和独立重定位参数 | [relocation.launch.py](../src/SuperLIO_SLAM/launch/relocation.launch.py)、[relocation.yaml](../src/SuperLIO_SLAM/config/relocation/relocation.yaml) |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the real STD -> GICP -> iSAM2 ROS node on a repeated static scene.
+"""Exercise the real Scan Context -> submap GICP -> iSAM2 ROS node on a repeated static scene.
 
 Run after sourcing the package overlay. An optional binary XYZI PCD supplies a
 real scene; the default scene is deterministic and generated in memory.
@@ -19,7 +19,7 @@ from nav_msgs.msg import Odometry, Path as NavPath
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
 from super_lio_slam.msg import KeyFrame
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
 from tf2_msgs.msg import TFMessage
 
 
@@ -60,13 +60,9 @@ def main():
     parser.add_argument('--pcd', help='Optional binary PCD scene')
     parser.add_argument('--moving', action='store_true', help='Use nonzero true translation and rotation')
     parser.add_argument('--reject-registration', action='store_true', help='Force the registration minimum-point gate to reject candidates')
-    parser.add_argument('--mode', choices=['std_gicp', 'std_teaser_gicp', 'sc_gicp', 'sc_teaser_gicp'], default='std_gicp')
-    parser.add_argument('--candidate-mode', choices=['std', 'sc', 'distance'], default='std')
     parser.add_argument('--candidate-radius', type=float, default=15.0)
     parser.add_argument('--reject-distance', action='store_true')
-    parser.add_argument('--submap-frames', type=int, default=4, help='New-mode causal window size')
-    parser.add_argument('--coarse-inlier-ratio', type=float, default=0.3)
-    parser.add_argument('--coarse-max-rmse', type=float, default=0.3)
+    parser.add_argument('--submap-frames', type=int, default=4, help='Causal GICP window size')
     parser.add_argument('--loop-min-time-separation', type=float, default=0.0, help='Test override; runtime default is 30 s')
     parser.add_argument('--timestamp-step', type=float, default=0.0, help='Synthetic sensor seconds per frame; zero uses node time')
     parser.add_argument('--sensor-stamp-base', type=float, help='Sensor epoch independent of the node clock; requires a positive timestamp step')
@@ -79,33 +75,24 @@ def main():
     points = scene_points(args.pcd)
     points = points[np.isfinite(points).all(axis=1)]
     log = tempfile.NamedTemporaryFile(prefix='super_lio_loop_test_', suffix='.log', delete=False)
-    command = [args.backend, '--ros-args', '-p', 'skip_near_num:=2',
-               '-p', 'loop_min_interval:=1', '-p', 'gicp_submap_half_width:=0',
+    command = [args.backend, '--ros-args',
+               '-p', 'loop_min_interval:=1',
                '-p', 'graph_loop_translation_sigma:=0.02',
                '-p', 'map_publish_stride:=1',
-               '-p', f'loop_registration_mode:={args.mode}',
-               '-p', f'loop_candidate_mode:={args.candidate_mode}',
                '-p', f'loop_candidate_radius_m:={args.candidate_radius}',
                '-p', f'registration_submap_max_keyframes:={args.submap_frames}',
-               '-p', f'coarse_min_inlier_ratio:={args.coarse_inlier_ratio}',
-               '-p', f'coarse_max_inlier_rmse_m:={args.coarse_max_rmse}',
                '-p', f'loop_min_time_separation_s:={args.loop_min_time_separation}']
-    if args.mode.startswith('sc_'):
-        args.candidate_mode = 'sc'
-    use_teaser = args.mode.endswith('_teaser_gicp')
-    if args.candidate_mode == 'sc':
-        # Let one synthetic loop constrain yaw strongly enough to observe its sign in PGO.
-        command += ['-p', 'graph_loop_rotation_sigma:=0.01']
+    # Let the loop constrain yaw strongly enough to observe its sign in PGO.
+    command += ['-p', 'graph_loop_rotation_sigma:=0.01']
     if args.reject_registration:
         command += ['-p', 'registration_min_points:=100000']
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
     rclpy.init()
     node = rclpy.create_node('online_loop_smoke')
-    received, loops, std_triangles = [], [], []
+    received, loops = [], []
     paths, maps, transforms, raw_positions = [], [], [], []
     node.create_subscription(Odometry, '/lio_slam/odom', received.append, 10)
     node.create_subscription(MarkerArray, '/lio_slam/loop_markers', loops.append, 10)
-    node.create_subscription(MarkerArray, '/lio_slam/std_triangles', std_triangles.append, 10)
     node.create_subscription(NavPath, '/lio_slam/path', paths.append, 10)
     node.create_subscription(PointCloud2, '/lio_slam/map', maps.append, 10)
     node.create_subscription(TFMessage, '/tf', lambda msg: transforms.extend(
@@ -159,18 +146,6 @@ def main():
         deadline = time.monotonic() + (2 if expect_rejection else 20)
         while not loops and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)
-        deadline = time.monotonic() + 2
-        while len(std_triangles) < 5 and time.monotonic() < deadline:
-            rclpy.spin_once(node, timeout_sec=0.1)
-        assert len(std_triangles) >= 5, 'Missing online STD triangle markers'
-        edges, vertices = std_triangles[-1].markers
-        assert edges.header.frame_id == 'map' and edges.type == Marker.LINE_LIST
-        assert vertices.header.frame_id == 'map' and vertices.type == Marker.SPHERE_LIST
-        if args.candidate_mode=='std':
-            assert 0 < len(edges.points) <= 600 and len(edges.points) % 6 == 0
-        else:
-            assert not edges.points and edges.action==Marker.DELETE, 'Non-STD mode generated STD geometry'
-        assert len(vertices.points) * 2 == len(edges.points)
         # Wait for delayed loop corrections and their asynchronous map snapshot.
         deadline = time.monotonic() + (0.5 if expect_rejection else 15)
         while not expect_rejection and time.monotonic() < deadline:
@@ -238,29 +213,18 @@ def main():
             print(f'PASS: 5 keyframes, accepted loop, 1.000 m raw drift -> {corrected:.4f} m corrected')
         log.flush()
         diagnostic_log = re.sub(r'\x1b\[[0-9;]*m', '', Path(log.name).read_text())
-        assert 'Loop search input=' not in diagnostic_log, 'Verbose search summary leaked into INFO'
-        assert 'hash_candidates=' not in diagnostic_log, 'Verbose candidate counts leaked into INFO'
         if args.reject_time_window or args.reject_distance:
-            assert 'matched:' not in diagnostic_log and 'accepted:' not in diagnostic_log and 'Distance candidate ' not in diagnostic_log, 'Candidate passed rejection gate'
-        elif args.candidate_mode=='distance':
-            assert 'Distance candidate ' in diagnostic_log and 'STD ' not in diagnostic_log, 'Distance retrieval was not exercised'
-        elif args.candidate_mode == 'sc':
-            assert re.search(r'SC \d+ -> \d+ matched: sc_distance=', diagnostic_log), 'Missing SC match'
-            assert not re.search(r'STD \d+ -> \d+ matched:', diagnostic_log), 'SC mode ran STD matching'
+            assert 'matched:' not in diagnostic_log and 'accepted:' not in diagnostic_log, 'Candidate passed rejection gate'
+        else:
+            assert re.search(r'SC \d+ -> \d+ matched: sc_distance=', diagnostic_log), 'Missing Scan Context match'
             if args.moving:
                 yaw_hints = re.findall(r'SC 0 -> [34] matched:.*?yaw=([\d.]+) deg', diagnostic_log)
-                assert any(abs(float(hint) - 90.0) <= 6.0 for hint in yaw_hints), 'Incorrect SC yaw hint direction'
-        else:
-            assert 'STD ' in diagnostic_log and 'matched:' in diagnostic_log, 'Missing verified STD match'
+                assert any(abs(float(hint) - 90.0) <= 6.0 for hint in yaw_hints), 'Incorrect Scan Context yaw direction'
         if args.reject_registration:
-            assert ('stage=few_points' in diagnostic_log if use_teaser
-                    else 'stage=few_gicp_points' in diagnostic_log), 'Missing registration gate diagnostic'
-        if use_teaser and not expect_rejection:
-            assert 'TEASER/GICP' in diagnostic_log, 'New registration mode was not exercised'
-            assert 'coarse_rmse=' in diagnostic_log and 'gicp=executed' in diagnostic_log, 'Missing registration quality summary'
+            assert 'stage=few_gicp_points' in diagnostic_log, 'Missing GICP gate diagnostic'
         elif not expect_rejection:
-            assert 'accepted: GICP' in diagnostic_log, 'Direct GICP was not exercised'
-            assert 'stage=accepted' in diagnostic_log, 'Missing direct GICP quality decision'
+            assert 'accepted: GICP' in diagnostic_log, 'No GICP constraint was committed'
+            assert 'accepted: initial=sc_yaw' in diagnostic_log, 'Scan Context yaw did not seed an accepted GICP result'
         print(f'Backend log: {log.name}')
     finally:
         node.destroy_node()

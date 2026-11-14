@@ -20,7 +20,6 @@ install(TARGETS scancontext_core EXPORT export_scancontext_core
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)
 install(DIRECTORY cpp/module/Scancontext/ DESTINATION include FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 install(FILES ros2/launch/scancontext_extract.launch.py
-              ros2/launch/all_descriptors.launch.py
               ros2/launch/visualize_descriptors.launch.py
         DESTINATION share/${PROJECT_NAME}/launch)
 install(FILES ros2/rviz/descriptor_visualization.rviz

@@ -79,7 +79,7 @@ def main():
 
         with (directory / 'backend.log').open('w') as log:
             process = subprocess.Popen([
-                executable, '--ros-args', '-p', 'loop_candidate_mode:=distance',
+                executable, '--ros-args',
                 '-p', 'save_map_path:=' + str(output), '-p', 'save_map_voxel_size:=0.0',
                 '-p', 'save_map_on_shutdown:=true', '-p', 'keyframe_cloud_voxel_size:=0.0',
                 '-p', 'map_max_keyframes:=1', '-p', 'map_max_points_per_keyframe:=1'],

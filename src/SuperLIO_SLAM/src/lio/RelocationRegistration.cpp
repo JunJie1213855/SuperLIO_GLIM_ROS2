@@ -39,7 +39,7 @@ namespace super_lio_slam
   }
 
   RegistrationCloud::Ptr prepareRelocationReference(const RegistrationCloud::ConstPtr &input,
-                                                     double voxel_size)
+                                                    double voxel_size)
   {
     // PCD 声称 is_dense 也可能含 NaN，先逐点检查 XYZ，再做一次 W 系体素质心采样。
     if (!std::isfinite(voxel_size) || voxel_size < 0)
@@ -60,6 +60,7 @@ namespace super_lio_slam
     return sample(finite, voxel_size, 0);
   }
 
+  // 粗配准(先验位姿) -> 精配准
   RelocationResult registerRelocation(const RelocationSnapshot &task,
                                       const RegistrationSettings &settings,
                                       double crop_radius, double max_gravity_angle_deg)
@@ -103,7 +104,6 @@ namespace super_lio_slam
     RegistrationCloud::Ptr target;
     RegistrationCloud::Ptr hinted_target;
 
-
     // 有先验位姿，就把参考帧 target 转换为 hinted_target
     if (task.world_from_local_hint)
     {
@@ -124,6 +124,8 @@ namespace super_lio_slam
     auto attempt = [&](const Eigen::Matrix4d *hint)
     {
       RegistrationResult result;
+
+      // 粗配准 -> 初始化位姿
       if (hint) // 有先验
       {
         const Eigen::Matrix4d identity = Eigen::Matrix4d::Identity();
@@ -132,7 +134,7 @@ namespace super_lio_slam
           // hinted_target 在近似 S 系：将其坐标系到 W 的先验左乘，恢复完整的 T_W_S。
           result.transform = (*hint * result.transform).eval();
       }
-      else     // 无先验，直接粗匹配
+      else // 无先验，直接粗匹配
       {
         // teaser++ 粗配准
         result = coarseRegister(source, target, settings);
@@ -143,7 +145,7 @@ namespace super_lio_slam
         result = refineRegister(source, target, current, settings, result);
       return result;
     };
-    
+
     output.registration = attempt(task.world_from_local_hint ? &*task.world_from_local_hint : nullptr);
     // 先验引导失败后去掉匹配提示重试；仍复用本次构建的目标点云，不重新做全图裁剪。
     if (!output.registration.accepted && task.world_from_local_hint)

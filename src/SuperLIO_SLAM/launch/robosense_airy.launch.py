@@ -15,7 +15,7 @@ def generate_launch_description():
         DeclareLaunchArgument('slam_config', default_value=PathJoinSubstitution(
             [share, 'config', 'loop/slam.yaml'])),
         DeclareLaunchArgument('registration_config', default_value=PathJoinSubstitution(
-            [share, 'config', 'loop/loop_indoor_teaser_gicp.yaml'])),
+            [share, 'config', 'loop/loop_indoor_gicp.yaml'])),
         DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false']),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([share, 'launch', 'slam.launch.py'])),

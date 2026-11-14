@@ -9,47 +9,15 @@ super_lio_node:
 
 loop_backend_node:
   ros__parameters:
-    # STD plane and triangle descriptor extraction.
-    ds_size: 0.5
-    maximum_corner_num: 250
-    plane_detection_thre: 0.01
-    plane_merge_normal_thre: 0.2
-    voxel_size: 2.0
-    voxel_init_num: 10
-    proj_image_resolution: 0.5
-    proj_dis_min: 0.0
-    proj_dis_max: 5.0
-    corner_thre: 2.0
-    descriptor_near_num: 10
-    descriptor_min_len: 2.0
-    descriptor_max_len: 50.0
-    non_max_suppression_radius: 2.0
-    std_side_resolution: 0.2
-    skip_near_num: 10
-    candidate_num: 50
-    sub_frame_num: 10
-    vertex_diff_threshold: 0.5
-    rough_dis_threshold: 0.1
-    normal_threshold: 0.2
-    dis_threshold: 0.5
-    icp_threshold: 0.4
-
-    # Shared GICP registration and quality settings are in loop_teaser_gicp.yaml.
-    # Direct GICP aligns one current frame to a historical local submap.
     keyframe_cloud_voxel_size: 0.2
     keyframe_cloud_max_points: 30000
-    gicp_submap_half_width: 5
 
     # iSAM2 graph, corrected map, and repeated-loop suppression.
     loop_min_interval: 20
-    loop_candidate_mode: std
-    loop_registration_mode: std_teaser_gicp
-    # use_teaserpp: false  # 可选：仅关闭粗配准，保持多帧子图；未指定时沿用模式默认值。
-    loop_candidate_radius_m: 15.0  # spatial gate for all candidate modes
+    loop_candidate_radius_m: 15.0  # maximum raw-odometry distance for Scan Context candidates
     sc_candidate_count: 10  # eligible ring-key neighbors to compare
     sc_distance_threshold: 0.13  # strict upper bound on Scan Context distance
     loop_min_time_separation_s: 30.0  # candidate stamp gap must be strictly greater
-    loop_diagnostic_stride: 1  # 0 disables per-keyframe STD summaries
     graph_prior_translation_sigma: 0.001
     graph_prior_rotation_sigma: 0.001
     graph_odom_translation_sigma: 0.1
@@ -57,7 +25,6 @@ loop_backend_node:
     graph_loop_translation_sigma: 0.2
     graph_loop_rotation_sigma: 0.1
     graph_loop_huber_k: 1.345
-    std_visualization_max_triangles: 100
     registration_queue_capacity: 2
     map_publish_stride: 30
     map_max_keyframes: 2000

@@ -15,7 +15,7 @@ from launch_ros.substitutions import FindPackageShare
 def _make_loop_backend(context):
     # Use the ABI selected at build time even if the parent terminal sources ROS last.
     share = Path(FindPackageShare('super_lio_slam').perform(context))
-    runtime_file = share / 'config' / 'runtime_library_dirs.txt'
+    runtime_file = share / 'config' / 'loop_runtime_library_dirs.txt'
     if not runtime_file.is_file():
         raise RuntimeError('Missing runtime library configuration; rebuild super_lio_slam')
     directories = [line.strip() for line in runtime_file.read_text().splitlines() if line.strip()]
@@ -24,7 +24,7 @@ def _make_loop_backend(context):
     inherited = context.environment.get('LD_LIBRARY_PATH', '').split(os.pathsep)
     library_path = os.pathsep.join(dict.fromkeys(directory for directory in [*directories, *inherited] if directory))
     save_overrides = {}
-    for name, value_type in [('use_teaserpp', bool), ('save_map_path', str), ('save_map_voxel_size', float),
+    for name, value_type in [('save_map_path', str), ('save_map_voxel_size', float),
                              ('save_map_on_shutdown', bool)]:
         if LaunchConfiguration(name).perform(context):
             save_overrides[name] = ParameterValue(LaunchConfiguration(name), value_type=value_type)
@@ -33,8 +33,6 @@ def _make_loop_backend(context):
         output='screen', additional_env={'LD_LIBRARY_PATH': library_path},
         parameters=[LaunchConfiguration('slam_config'), LaunchConfiguration('registration_config'), {
             'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
-            'loop_registration_mode': LaunchConfiguration('loop_registration_mode'),
-            'loop_candidate_mode': LaunchConfiguration('loop_candidate_mode'),
             'loop_candidate_radius_m': ParameterValue(LaunchConfiguration('loop_candidate_radius_m'), value_type=float),
             **save_overrides,
         }],
@@ -75,20 +73,13 @@ def generate_launch_description():
         DeclareLaunchArgument('downsample_mode', default_value='', choices=['', 'fixed', 'adaptive'],
                               description='LIO sampling; empty uses sensor YAML (default fixed)'),
         DeclareLaunchArgument('slam_config', default_value=config('loop/slam.yaml'),
-                              description='Keyframe, STD, iSAM2 and map parameters'),
-        DeclareLaunchArgument('registration_config', default_value=config('loop/loop_teaser_gicp.yaml'),
-                              description='Shared GICP quality and optional TEASER++ parameters'),
+                              description='Keyframe, Scan Context, iSAM2 and map parameters'),
+        DeclareLaunchArgument('registration_config', default_value=config('loop/loop_gicp.yaml'),
+                              description='Submap GICP and quality parameters'),
         DeclareLaunchArgument('enable_loop_backend', default_value='true', choices=['true', 'false'],
                               description='Enable keyframes and the online pose-graph backend'),
-        DeclareLaunchArgument('loop_candidate_mode', default_value='std',
-                              choices=['distance', 'std', 'sc'], description='Loop candidate retrieval'),
         DeclareLaunchArgument('loop_candidate_radius_m', default_value='15.0',
-                              description='Maximum raw-odometry candidate distance in both retrieval modes'),
-        DeclareLaunchArgument('loop_registration_mode', default_value='std_teaser_gicp',
-                              choices=['std_gicp', 'std_teaser_gicp', 'sc_gicp', 'sc_teaser_gicp'],
-                              description='Loop registration algorithm (sc_* selects Scan Context candidates)'),
-        DeclareLaunchArgument('use_teaserpp', default_value='', choices=['', 'true', 'false'],
-                              description='Loop coarse registration; empty uses YAML or registration mode default'),
+                              description='Maximum raw-odometry candidate distance for Scan Context loop candidates'),
         DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('save_map_path', default_value='',
                               description='Optimized PCD output path; empty uses slam_config'),

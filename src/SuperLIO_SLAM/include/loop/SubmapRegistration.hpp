@@ -110,13 +110,10 @@ namespace super_lio_slam
                                     const RegistrationCloud::ConstPtr &current,
                                     const RegistrationSettings &settings,
                                     RegistrationResult coarse);
-  // 回环 A/B 对比只改变初值来源，两组使用相同子图、GICP 和最终验收门限。
-  // initial 为 H<-C 的里程计初值；关闭粗配准时不计算 FPFH，也不调用 TEASER++。
+  // initial is the rigid transform from the current submap anchor into the historical anchor.
   RegistrationResult registerSubmaps(const RegistrationCloud::ConstPtr &source,
                                     const RegistrationCloud::ConstPtr &target,
                                     const RegistrationCloud::ConstPtr &current,
                                     const RegistrationSettings &settings,
-                                    bool use_teaserpp,
-                                    const Eigen::Matrix4d &initial,
-                                    const Eigen::Matrix4d *pose_hint = nullptr);
+                                    const Eigen::Matrix4d &initial);
 } // namespace super_lio_slam

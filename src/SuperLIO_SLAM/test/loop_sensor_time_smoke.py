@@ -35,12 +35,12 @@ def main():
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    runtime = args.backend.resolve().parent / "runtime_library_dirs.txt"
+    runtime = args.backend.resolve().parent / "loop_runtime_library_dirs.txt"
     if runtime.exists():
         env["LD_LIBRARY_PATH"] = ":".join(runtime.read_text().splitlines() + [env.get("LD_LIBRARY_PATH", "")])
     log = (args.out / "backend.log").open("w")
-    command = [str(args.backend), "--ros-args", "-p", "loop_candidate_mode:=distance",
-               "-p", "loop_registration_mode:=std_gicp", "-p", "map_publish_stride:=1",
+    command = [str(args.backend), "--ros-args",
+               "-p", "map_publish_stride:=1",
                "-p", "loop_min_time_separation_s:=10000.0", "-p", "tf_publish_rate_hz:=40.0",
                "-p", "use_sim_time:=" + str(args.use_sim_time).lower()]
     process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)

@@ -43,11 +43,9 @@ find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(PCL REQUIRED COMPONENTS common io filters kdtree registration features search)
 find_package(Glog REQUIRED)
 find_package(gflags REQUIRED)
-find_package(Ceres REQUIRED)
 find_package(GTSAM REQUIRED)
-find_package(OpenMP REQUIRED)
 
-option(SUPERLIO_WITH_TEASER "Build the multi-frame TEASER++ / GICP backend" ON)
+option(SUPERLIO_WITH_TEASER "Enable TEASER++ for reference-map relocation" ON)
 if(SUPERLIO_WITH_TEASER)
   find_package(teaserpp CONFIG REQUIRED HINTS
     "${CMAKE_CURRENT_SOURCE_DIR}/../../install/teaserpp")
@@ -61,21 +59,28 @@ if(SUPERLIO_WITH_TEASER)
 endif()
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/runtime_library_dirs.txt"
   CONTENT "${SUPERLIO_RUNTIME_LIBRARY_DIRS}\n")
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/loop_runtime_library_dirs.txt"
+  CONTENT "$<TARGET_FILE_DIR:gtsam>\n")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/runtime_library_dirs.txt"
+  "${CMAKE_CURRENT_BINARY_DIR}/loop_runtime_library_dirs.txt"
   DESTINATION share/${PROJECT_NAME}/config)
 
 add_library(submap_registration STATIC
   src/loop/SubmapWindow.cpp
-  src/loop/TeaserCoarseRegistration.cpp
-  src/loop/GicpRegistration.cpp
-  src/lio/RelocationRegistration.cpp)
+  src/loop/GicpRegistration.cpp)
 set_target_properties(submap_registration PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(submap_registration PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include ${PCL_INCLUDE_DIRS})
-target_link_libraries(submap_registration PUBLIC Eigen3::Eigen ${PCL_LIBRARIES} OpenMP::OpenMP_CXX)
+target_link_libraries(submap_registration PUBLIC Eigen3::Eigen ${PCL_LIBRARIES})
+add_library(relocation_registration STATIC
+  src/lio/TeaserCoarseRegistration.cpp
+  src/lio/RelocationRegistration.cpp)
+set_target_properties(relocation_registration PROPERTIES POSITION_INDEPENDENT_CODE ON)
+find_package(OpenMP REQUIRED)
+target_link_libraries(relocation_registration PUBLIC submap_registration OpenMP::OpenMP_CXX)
 if(SUPERLIO_WITH_TEASER)
-  target_compile_definitions(submap_registration PUBLIC SUPERLIO_WITH_TEASER)
-  target_link_libraries(submap_registration PUBLIC teaserpp::teaser_registration)
+  target_compile_definitions(relocation_registration PUBLIC SUPERLIO_WITH_TEASER)
+  target_link_libraries(relocation_registration PUBLIC teaserpp::teaser_registration)
 endif()
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -97,17 +102,6 @@ target_include_directories(basic_core PUBLIC
   ${PCL_INCLUDE_DIRS}
 )
 target_link_libraries(basic_core PUBLIC Eigen3::Eigen ${PCL_LIBRARIES} glog gflags)
-
-add_library(std_descriptor_core std/src/STDesc.cpp)
-target_include_directories(std_descriptor_core PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/std/include>
-  $<INSTALL_INTERFACE:include/${PROJECT_NAME}/std>
-  ${PCL_INCLUDE_DIRS}
-)
-ament_target_dependencies(std_descriptor_core PUBLIC
-  rclcpp sensor_msgs visualization_msgs geometry_msgs pcl_conversions)
-target_link_libraries(std_descriptor_core PUBLIC
-  Eigen3::Eigen ${PCL_LIBRARIES} Ceres::ceres OpenMP::OpenMP_CXX)
 
 add_library(adaptive_voxel_filter STATIC src/lio/AdaptiveVoxelFilter.cpp)
 set_target_properties(adaptive_voxel_filter PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -133,7 +127,7 @@ ament_target_dependencies(lio PUBLIC
   rclcpp std_msgs geometry_msgs sensor_msgs visualization_msgs nav_msgs
   pcl_ros pcl_conversions livox_ros_driver2 tf2_ros rosidl_default_runtime)
 target_link_libraries(lio PUBLIC
-  basic_core adaptive_voxel_filter submap_registration Eigen3::Eigen ${PCL_LIBRARIES} glog
+  basic_core adaptive_voxel_filter relocation_registration Eigen3::Eigen ${PCL_LIBRARIES} glog
   ${cpp_typesupport_target})
 
 add_executable(super_lio_node src/apps/super_lio_node.cpp)
@@ -141,11 +135,6 @@ target_link_libraries(super_lio_node PRIVATE lio)
 
 add_executable(relocation_node src/apps/relocation_node.cpp)
 target_link_libraries(relocation_node PRIVATE lio)
-
-add_executable(std_extract_node std/ros2/std_extract_node.cpp)
-ament_target_dependencies(std_extract_node PUBLIC
-  rclcpp std_msgs sensor_msgs geometry_msgs visualization_msgs pcl_conversions)
-target_link_libraries(std_extract_node PRIVATE std_descriptor_core)
 
 add_executable(loop_backend_node
   src/apps/loop_backend_node.cpp
@@ -162,11 +151,11 @@ ament_target_dependencies(loop_backend_node PUBLIC
   rclcpp std_msgs std_srvs sensor_msgs geometry_msgs visualization_msgs nav_msgs
   pcl_conversions tf2_ros rosidl_default_runtime)
 target_link_libraries(loop_backend_node PRIVATE
-  submap_registration std_descriptor_core Eigen3::Eigen ${PCL_LIBRARIES} gtsam
+  submap_registration Eigen3::Eigen ${PCL_LIBRARIES} gtsam
   ${cpp_typesupport_target})
 
 if(WITH_JEMALLOC)
-  foreach(node_target IN ITEMS super_lio_node relocation_node loop_backend_node std_extract_node)
+  foreach(node_target IN ITEMS super_lio_node relocation_node loop_backend_node)
     # 分配通常发生在间接依赖中，--as-needed 可能误删 jemalloc 的动态依赖。
     # 只在该库周围关闭裁剪，并恢复之前的链接器状态；库由进程启动时自动加载。
     target_link_libraries(${node_target} PRIVATE
@@ -174,18 +163,17 @@ if(WITH_JEMALLOC)
   endforeach()
 endif()
 
-install(TARGETS basic_core std_descriptor_core adaptive_voxel_filter lio
+install(TARGETS basic_core adaptive_voxel_filter lio
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
 install(TARGETS
-  super_lio_node relocation_node std_extract_node loop_backend_node
+  super_lio_node relocation_node loop_backend_node
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION include/${PROJECT_NAME})
 install(DIRECTORY basic/include/ DESTINATION include/${PROJECT_NAME}/basic)
-install(DIRECTORY std/include/ DESTINATION include/${PROJECT_NAME}/std)
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 install(DIRECTORY config/ DESTINATION share/${PROJECT_NAME}/config)
 install(DIRECTORY rviz/ DESTINATION share/${PROJECT_NAME}/rviz)
@@ -209,13 +197,13 @@ if(BUILD_TESTING)
   set_tests_properties(lio_downsample_test PROPERTIES TIMEOUT 45
     ENVIRONMENT "ROS_DOMAIN_ID=48;ROS_LOCALHOST_ONLY=1")
   add_executable(relocation_pcd_check test/relocation_pcd_check.cpp)
-  target_link_libraries(relocation_pcd_check PRIVATE submap_registration)
+  target_link_libraries(relocation_pcd_check PRIVATE relocation_registration)
   add_executable(optimized_map_writer_test test/optimized_map_writer_test.cpp src/loop/OptimizedMapWriter.cpp)
   target_include_directories(optimized_map_writer_test PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(optimized_map_writer_test PRIVATE Eigen3::Eigen ${PCL_LIBRARIES})
   add_test(NAME optimized_map_writer_test COMMAND optimized_map_writer_test)
   add_executable(submap_registration_test test/submap_registration_test.cpp)
-  target_link_libraries(submap_registration_test PRIVATE submap_registration)
+  target_link_libraries(submap_registration_test PRIVATE relocation_registration)
   add_test(NAME submap_registration_test COMMAND submap_registration_test)
   add_executable(relocation_state_test test/relocation_state_test.cpp)
   target_link_libraries(relocation_state_test PRIVATE lio submap_registration)

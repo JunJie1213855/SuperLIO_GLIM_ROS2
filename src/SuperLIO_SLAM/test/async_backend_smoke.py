@@ -2,7 +2,7 @@
 """Burst real keyframes while registration is busy; require lossless graph ingress.
 
 Use a private ROS_DOMAIN_ID and source the workspace before running. This exercises
-actual STD/TEASER/GICP workers, task eviction, map coalescing and delayed loops.
+actual Scan Context/GICP workers, task eviction, map coalescing and delayed loops.
 """
 import argparse
 import os
@@ -32,10 +32,8 @@ def main():
     os.environ.setdefault('ROS_LOG_DIR', '/tmp/super_lio_async_test_logs')
     log = tempfile.NamedTemporaryFile(prefix='superlio_async_burst_', suffix='.log', delete=False)
     process = subprocess.Popen([args.backend, '--ros-args',
-        '-p', 'loop_registration_mode:=std_teaser_gicp', '-p', 'loop_candidate_mode:=std',
-        '-p', 'registration_queue_capacity:=1', '-p', 'skip_near_num:=2',
+        '-p', 'registration_queue_capacity:=1',
         '-p', 'loop_min_interval:=0', '-p', 'loop_min_time_separation_s:=0.0', '-p', 'registration_submap_max_keyframes:=2',
-        '-p', 'coarse_min_inlier_ratio:=0.2', '-p', 'coarse_max_inlier_rmse_m:=0.35',
         '-p', 'graph_loop_translation_sigma:=0.02', '-p', 'map_publish_stride:=1',
         '-p', 'map_max_points_per_keyframe:=30000', '-p', 'map_voxel_size:=0.1'],
         stdout=log, stderr=subprocess.STDOUT)
@@ -99,7 +97,7 @@ def main():
         assert 'Keyframe ID gap' not in text and 'failed:' not in text, text
         dropped = [int(n) for n in re.findall(r'dropped_tasks=(\d+)',text)]
         assert dropped and max(dropped)>0, 'Burst did not exercise bounded-queue eviction'
-        # The graph mutex never protects a TEASER call: observed ingress should
+        # The graph mutex never protects a GICP call: observed ingress should
         # finish ahead of a serial execution of the logged registration work.
         waits = re.findall(r'Registration timing frame=(\d+) queue_wait=([\d.]+) ms work=([\d.]+) ms',text)
         assert waits, 'Missing worker timing diagnostics'

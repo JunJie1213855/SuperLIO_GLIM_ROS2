@@ -1,6 +1,6 @@
 # 第三方依赖
 
-TEASER++ 是固定版本的子模块，当前已经通过独立 CMake 安装链接到可选 `std_teaser_gicp` 后端。
+TEASER++ 是固定版本的子模块，当前已经通过独立 CMake 安装链接到参考地图重定位模块。
 
 - 上游：https://github.com/MIT-SPARK/TEASER-plusplus
 - 提交：`52a9c52ee7d4c838c5e8a75458c33178be5bfb70`
@@ -16,4 +16,4 @@ python3 tools/build_teaserpp.py --jobs 1
 
 脚本固定 PMC、tinyply、Spectra 提交，保留在 `build/teaserpp_vendor`。缓存齐全后可加 `--offline`，缺少依赖或提交/工作树不符则报错，不覆盖已有修改。构建产物位于 `build/teaserpp`，安装至 `install/teaserpp`，不用 sudo。
 
-主包通过 `find_package(teaserpp CONFIG REQUIRED)` 查找并链接 `teaserpp::teaser_registration`；支持 `teaserpp_DIR` 指定其他兼容安装。只构建旧后端可用 `-DSUPERLIO_WITH_TEASER=OFF`。
+主包通过 `find_package(teaserpp CONFIG REQUIRED)` 查找并链接 `teaserpp::teaser_registration`；支持 `teaserpp_DIR` 指定其他兼容安装。仅使用建图和回环可用 `-DSUPERLIO_WITH_TEASER=OFF`。

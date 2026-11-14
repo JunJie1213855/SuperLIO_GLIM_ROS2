@@ -96,6 +96,7 @@ namespace LI2Sup
                      .toRotationMatrix();
     prior_pose_ = SE3(R, V3(g_init_px, g_init_py, g_init_pz));
 
+    // 设置
     auto &s = settings_;
     s.voxel = positive("registration_voxel_size_m", .3);
     s.min_points = integer("registration_min_points", 100, 30, 100000);
@@ -143,6 +144,8 @@ namespace LI2Sup
     if (s.feature_radius <= s.normal_radius || s.feature_ratio > 1 || s.min_pairs > s.max_pairs ||
         s.coarse_min_ratio > 1 || s.min_overlap >= 1 || s.min_current_overlap >= 1)
       throw std::invalid_argument("inconsistent relocation feature/quality parameters");
+    
+    // ros
     rclcpp::PublisherOptions status_options;
     status_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
     status_pub_ = node.create_publisher<std_msgs::msg::String>("/lio/relocation/status",
@@ -261,7 +264,7 @@ namespace LI2Sup
       scan_undistort_full_->push_back(out);
     }
 
-    // 降采样
+    // 降采样 -> pd 控制采样密度
     DownSample();
 
     // 扫描限制
@@ -347,7 +350,7 @@ namespace LI2Sup
 
     // 设置局部坐标系地图和参考帧
     task.local_map = local_map;        // 局部坐标系地图
-    task.reference = reference_cloud_; // 参考帧地图
+    task.reference = reference_cloud_; // 参考帧的先验地图
     task.local_gravity = kf_->GetGravity().cast<double>();
 
     // 先验给的是某帧 T_W_I，与对应 T_S_I 相消后得到整张局部地图的 T_W_S 提示。
@@ -413,7 +416,7 @@ namespace LI2Sup
       }
       try
       {
-        // 重定位配准
+        // ！！！重定位配准！！！
         result = registerRelocation(task, settings_, crop_radius_, gravity_angle_);
       }
       catch (const std::exception &e)
@@ -453,9 +456,12 @@ namespace LI2Sup
     // 上一个结果是否有效，无效就返回让循环提交下一次配准
     if (!result || result->generation != generation_ || !result->registration.accepted || !tracking_good_)
       return false;
+    
+    // 继续检验位姿转换的数值有效性 
     const auto &transform = result->registration.transform;
     if (!validRigidTransform(transform))
       return false;
+    
     // 快照 M 求得 T_W_S 后，直接乘当前 T_S_IN；无需把滤波器退回 M，也不能重置时间戳。
     // 再用最新 N 帧扫描验证，避免“旧地图能对齐，但车辆当前已跟丢”仍被接管。
     // A delayed snapshot must also align the latest moving scan before the handoff.
@@ -490,7 +496,7 @@ namespace LI2Sup
     }
     const SE3 world_from_local(transform.cast<scalar>());
     const double latest_time = kf_->GetTime();
-
+    // 从局部坐标系转换到重定位后的全局坐标系上
     // 一次性完成参考系接管：位姿、速度、重力、协方差以及高频预测缓存一起变换。
     // 偏置保持机体系定义，时间保留最新扫描时刻；具体雅可比见 ESKF::ChangeReferenceFrame。
     kf_->ChangeReferenceFrame(world_from_local, position_variance_, rotation_variance_);
@@ -500,6 +506,7 @@ namespace LI2Sup
     points_world_v3_.clear();
     world_pc_->clear();
     ds_world_->clear();
+
     // 从下一次 Observe 起改查参考地图；释放前端局部地图、清除旧坐标点缓存。
     // 已经运行的后台任务仍持有自己的不可变点云快照，结束后自然释放。
     ivox_ = reference_ivox_;
@@ -615,12 +622,12 @@ namespace LI2Sup
     // 有效观测仅包含通过匹配和残差检查的点到面项。
     tracking_good_ = valid_observations >= min_plane_points_ && kf_->GetSE3().matrix().allFinite();
    
-    if (stage_ == Stage::Local) // 如果是局部建图，就尝试进行重定位
+    if (stage_ == Stage::Local) // 如果当前是局部建图，就尝试进行重定位
     {
       if (tracking_good_)
       {
-        SuperLIO::UpdateMap(); // 地图更新
-        rememberLocalPose();
+        SuperLIO::UpdateMap(); // 先地图更新
+        rememberLocalPose();   // 记录局部地图的位姿
         // 没有可提交结果也会返回 false；不等同于“后台刚刚配准失败”。先尝试接管，再投递快照。
         if (!commitRegistration())
         {
@@ -633,7 +640,7 @@ namespace LI2Sup
         setStatus("LOCAL_TRACKING_DEGRADED");
       }
     }
-    else if (g_update_map && tracking_good_)  // 如果是全局坐标系建图且跟踪良好，那就更新地图
+    else if (g_update_map && tracking_good_)  // 如果是全局坐标系建图且跟踪良好，那就更新地图即可
     {
       SuperLIO::UpdateMap();
     }
