@@ -1,0 +1,18 @@
+rgbd_seg:
+  ros__parameters:
+    model_path: ''  # A local YOLO segmentation .pt; no implicit weight download
+    class_map_file: ''  # Defaults: chair=1, dining table=2, tv=3
+    device: cpu
+    confidence_threshold: 0.4
+    desired_frequency: 2.0
+    rgb_topic: /camera/color/image_raw
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    label_topic: /semantic_label_seg/image_labels
+    instance_topic: /semantic_label_seg/image_instances
+    confidence_topic: /semantic_label_seg/image_confidence
+    cloud_topic: /semantic_label_seg/rgbd_points
+    sync_slop: 0.05
+    depth_scale: 0.001  # Applies to integer depth only; 32FC1 is in metres
+    min_depth: 0.1
+    max_depth: 20.0

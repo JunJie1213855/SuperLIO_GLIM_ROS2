@@ -1,0 +1,15 @@
+lidar_seg:
+  ros__parameters:
+    model_dir: ''  # Directory containing arch_cfg.yaml, data_cfg.yaml and split weights
+    device: auto
+    input_type: pointcloud  # pointcloud or superlio_keyframe
+    input_topic: /semantic_label_seg/input_points
+    output_topic: /semantic_label_seg/points
+    inference_frame: ''  # REQUIRED when input is not already in the trained LiDAR frame
+    desired_frequency: 2.0
+    cpu_threads: 4
+    max_range: 40.0
+    confidence_threshold: 0.0
+    label_space: learning  # learning or original; never assume these IDs match Hydra
+    label_map_file: ''
+    unknown_label: 0

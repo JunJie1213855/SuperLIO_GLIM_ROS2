@@ -1,0 +1,4 @@
+# SLIDE-SLAM indoor label IDs. Unknown/unselected classes remain zero.
+chair: 1
+dining table: 2
+tv: 3

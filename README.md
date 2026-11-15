@@ -17,6 +17,7 @@ LIO 与重定位仅采用点到面观测，平面匹配失败的点直接丢弃�
 | 保存地图 | 服务保存完整优化关键帧地图，可配置退出自动保存，无需录制 rosbag |
 | 重定位 | S 系累积局部地图快照 → TEASER++ / GICP → 状态与协方差变换 → 参考地图跟踪 |
 | 地图合并 | 导出各会话关键帧 → GLIM dump → Offline Viewer 配准优化 → merged.pcd |
+| 语义标签 | 独立 `semantic_label_seg` 库：RangeNet 点云标签与 YOLO / RGB-D 标签，提供 Humble 节点 |
 
 ## 构建
 
@@ -46,9 +47,12 @@ source install/setup.bash
 - [SuperLIO 参数、话题与诊断](src/SuperLIO_SLAM/README.md)
 - [闭环配准与 iSAM2 PGO 理论](docs/loop_pgo_path.md)
 - [重定位坐标系、状态与协方差理论](docs/relocation_math.md)
+- [语义标签库：API、模型权重与 ROS 2 接口](src/semantic_label_seg/README.md)
 
 ```text
 src/SuperLIO_SLAM/   SuperLIO 前端、回环、保存地图与重定位
+src/semantic_label_seg/  独立语义标签库与 Humble 节点
+src/SLIDE_SLAM/      裁剪后的上游语义前端参考源码
 src/glim/           GLIM 子图优化
 src/glim/ros2/      ROS 2 接口与 Offline Viewer
 tools/              TEASER++ 构建、关键帧导出与地图格式转换
