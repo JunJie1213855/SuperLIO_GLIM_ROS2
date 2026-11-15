@@ -71,7 +71,7 @@ def cloud_to_arrays(message):
     return xyz, intensity
 
 
-def with_labels(message, labels, confidence, instance_ids=None):
+def with_labels(message, labels, confidence, instance_ids=None, *, colors=None):
     """Append explicit labels while retaining all other fields and original XYZ.
 
     Existing semantic fields are replaced; other fields including intensity,
@@ -95,6 +95,13 @@ def with_labels(message, labels, confidence, instance_ids=None):
     score = values["confidence"]
     if not np.isfinite(score).all() or (score < 0).any() or (score > 1).any():
         raise ValueError("confidence must be finite in [0,1]")
+    if colors is not None:
+        colors = np.asarray(colors)
+        if colors.shape != (n, 3) or colors.dtype != np.uint8:
+            raise ValueError("colors must be Nx3 uint8 RGB")
+        rgb = colors.astype(np.uint32)
+        # Packed UINT32 rgb is supported by RViz's RGB8 transformer.
+        values["rgb"] = (rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2]
     fields = [deepcopy(f) for f in message.fields if f.name not in values]
     point_step = message.point_step
     for name in values:

@@ -13,3 +13,6 @@ lidar_seg:
     label_space: learning  # learning or original; never assume these IDs match Hydra
     label_map_file: ''
     unknown_label: 0
+    publish_rgb: true  # Add packed rgb (UINT32) for RViz Color Transformer: RGB8
+    color_map_file: ''  # Optional YAML: final label ID -> [R,G,B], each 0..255
+    tf_wait_timeout: 2.0  # Wall seconds; bound waiting for timestamped TF

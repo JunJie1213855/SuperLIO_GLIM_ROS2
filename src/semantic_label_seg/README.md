@@ -8,7 +8,7 @@
 
 - LiDAR：输入 Nx3 点和反射强度，输出等长、同点序的 `uint32` 类别和 `float32` 分数。
 - RGB-D：图像实例分割输出类别图、帧内实例 ID、检测分数；对齐深度生成相机光学系语义点云。
-- 点云 ROS 输出增加真正的 `label` 字段，保留输入 XYZ、intensity、ring、time 等其他字段，保留 Header 与组织结构。
+- 点云 ROS 输出增加 `label`、`confidence` 字段；LiDAR 节点默认另加 `rgb` 供 RViz 着色。保留输入 XYZ、intensity、ring、time 等其他字段，以及 Header 与组织结构。
 - 坐标系变换仅用于 LiDAR 模型推理，ROS 输出的点仍使用原输入坐标。
 - 缺少或不兼容的权重直接报错；不会继续使用随机权重生成标签。
 - 本包不承担状态估计、对象跟踪、几何对象建模、拓扑建图或导航。
@@ -35,6 +35,74 @@ python3 -m pip install ultralytics  # 仅使用图像路线时需要
 
 本包自身不使用 `cv_bridge` 或 `ros_numpy`，避免当前机器上 NumPy 2 与 Humble 二进制 cv_bridge 的 ABI 冲突。
 不会替换你的系统 NumPy、CUDA 或 PyTorch。第三方推理库仍应使用相互兼容的依赖版本。
+
+## Super-LIO + 语义标签可视化（当前推荐入口）
+
+只需要下面这条链路：
+
+```text
+LiDAR + IMU → Super-LIO → /lio/cloud_world_dense（去畸变，world 系）
+                              ↓ 同时间戳 TF：world → imu → semantic_lidar
+                         转回雷达系做 RangeNet 推理
+                              ↓ 标签按原始点序附回 world 系点云
+                   /semantic_label_seg/points → RViz RGB8
+```
+
+Super-LIO 提供里程计、去畸变点云和 `world → imu` TF；分割节点提供逐点类别和颜色。
+这条启动链不使用 Hydra，也不启动 SLIDE-SLAM 后端、对象跟踪、拓扑图或回环后端。
+Super-LIO 自身用于定位的几何局部地图仍正常工作。
+
+先准备下一节所列的**真实训练权重目录**。仓库内没有这些权重，测试权重不能用来获得有效语义。
+以下以 Airy 配置为例；`sensor_config` 必须换成与你的雷达、IMU、话题及标定一致的配置。
+例如 VLP32 数据使用 `config/common/vlp32.yaml`，不要仅为了启动成功而套用其他传感器外参。
+
+```bash
+cd /home/ros/ros_ws/SuperLIO_GLIM_ROS2
+source /opt/ros/humble/setup.bash
+# super_lio_slam 已经编译过时，只需构建这一个 Python 包
+colcon build --packages-select semantic_label_seg --symlink-install
+source install/setup.bash
+
+ros2 launch semantic_label_seg superlio_semantic.launch.py \
+  sensor_config:=/home/ros/ros_ws/SuperLIO_GLIM_ROS2/src/SuperLIO_SLAM/config/common/robosense_airy.yaml \
+  model_dir:=/absolute/path/my_model \
+  device:=auto desired_frequency:=2.0
+```
+
+随后启动传感器驱动或播放对应 rosbag。若使用 `use_sim_time:=true`，播放时还需要 `ros2 bag play /path/to/bag --clock`。
+`device:=auto` 自动选择可用 CPU/CUDA；也可显式设置 `device:=cpu`。先用 2 Hz 检查效果，再按实际算力提高频率。
+Airy、Livox 等雷达与训练数据的扫描模式、视场、强度分布可能不同，模型能运行不代表分割精度合格。
+
+联合启动文件会为此次启动覆盖 `lio.output.dense=true`，并关闭关键帧发布、机器人位姿输出与 PCD 保存；
+不修改原传感器 YAML。它从同一个 YAML 的 `lio.extrinsic.lidar_imu` 读取完整外参，广播 `imu → semantic_lidar`。
+`semantic_lidar` 是用于推理的雷达坐标系，不要求原始驱动已发布相同名称的 TF。
+分割查询点云时间戳对应的 TF；变换晚到时暂存扫描重试，输出坐标始终保持原来的 `world` 系。
+
+**如果 Super-LIO 已经在运行**，加 `start_lio:=false`，避免重复启动。此时必须用同一份传感器配置，
+且已有 Super-LIO 必须已启用 `lio.output.dense=true`，确实发布 `/lio/cloud_world_dense`。
+`rviz:=false` 可关闭 GUI。该联合启动入口需要安装好的 `super_lio_slam`，普通库 API 和单独分割节点仍可独立使用。
+
+RViz 配置已设置：`Fixed Frame=world`、订阅 `/semantic_label_seg/points`、`Color Transformer=RGB8`、
+`Reliability=Best Effort`。默认只显示最新一帧，另显示 `/lio/path` 轨迹。
+若想看最近几秒的彩色点云，可把 `Semantic labels → Decay Time` 改为 3～10 秒；这是显示缓存，
+不会进行跨帧语义融合、地图持久化或回环修正。
+
+同一最终类别 ID 始终使用同一默认颜色，未知类别默认灰色；默认调色板每 20 类循环，不表示固定类别含义。
+类别名称由模型 `data_cfg.yaml` 决定，节点启动日志会打印 ID 对应名称。
+可通过 `color_map_file:=/absolute/path/colors.yaml` 指定最终输出 ID 的 RGB 颜色，例如：
+
+```yaml
+0: [96, 96, 96]    # unknown
+1: [255, 0, 0]    # 示例 ID；实际含义查模型配置
+2: [0, 255, 0]
+```
+
+`rgb: UINT32` 只供显示，`label: UINT32` 才是语义 ID，`confidence: FLOAT32` 是模型分数。
+单独启动 LiDAR 节点时也默认输出这三个字段；`publish_rgb:=false` 可关闭配色字段的生成。
+
+排查时先检查 `ros2 topic hz /lio/cloud_world_dense`，再检查 `ros2 topic hz /semantic_label_seg/points`。
+前者无数据先检查 Super-LIO 输入与初始化；后者无数据检查模型加载、日志中的 TF 提示及输入/推理坐标系。
+若出现 TF 缺失，可运行 `ros2 run tf2_ros tf2_echo world semantic_lidar` 检查整条坐标链。
 
 ## LiDAR 模型文件
 
@@ -88,12 +156,17 @@ ros2 launch semantic_label_seg lidar.launch.py params_file:=/absolute/path/lidar
 
 订阅和发布使用 SensorDataQoS。`desired_frequency=0.0` 表示不节流，正数按传感器时间戳节流。
 数据时间倒退时会重置该限频判断，适合重新播放录制数据。
+分割节点只保留一帧等待 TF 的扫描和最新一帧待处理扫描；推理速度不足时会丢弃中间扫描。
 
 `inference_frame` 指训练输入使用的 LiDAR 原点和轴向；输入 frame 不同时，在点云时间戳处查询 TF。
-找不到变换时该帧报错并跳过。为空时假定输入已经是正确 LiDAR 系；`world/map/odom` 输入会被拒绝。
+找不到变换时暂存该帧重试，最多等待 `tf_wait_timeout` 秒（默认 2 秒墙上时间），同时缓存后续最新帧。
+这样 TF 比点云稍晚到达时不会因不断替换待处理帧而持续丢失输出。
+为空时假定输入已经是正确 LiDAR 系；`world/map/odom` 输入会被拒绝。
 这是数值坐标变换，不是简单更改 `frame_id`。
 
 ### 接 Super-LIO
+
+逐帧可视化优先使用上面的 `superlio_semantic.launch.py`。下面保留可选的关键帧接法，适合只处理稀疏扫描的用途。
 
 当前项目 `/lio_slam/keyframe` 中 `cloud` 位于扫描末时刻的 IMU 系。可以直接选择消息类型：
 
@@ -160,3 +233,8 @@ python3 -m pytest test -q
 
 测试覆盖球面投影及原点索引、深度单位、类别/实例掩码重叠、真实 PyTorch 网络的合成权重载入/反投影、
 缺失权重报错，以及 PointCloud2/Image 大小端、行填充、时间戳、附加字段保留等契约。
+还覆盖 RGB 打包、标定旋转的方向/行主序/180 度情形，以及 world 系输入等待 TF 后推理并保留输出坐标的 ROS 消息传输。
+
+本机已通过全部 22 项测试，并用已有 UrbanNav VLP32 rosbag 对联合启动做了短时检查：
+Super-LIO 正常输出逐帧稠密点云，分割节点经完整 TF 链输出带 `label/confidence/rgb` 的 world 系点云。
+该检查关闭 RViz，使用合成权重，只验证节点与消息接线；真实类别精度和 GUI 显示效果仍需用实际权重检查。

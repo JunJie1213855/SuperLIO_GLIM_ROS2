@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 rclpy = pytest.importorskip("rclpy")
+from geometry_msgs.msg import TransformStamped
 from rclpy.context import Context
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
@@ -24,15 +25,22 @@ from std_msgs.msg import Header
 from semantic_label_seg import ImageLabels, PointLabels, lidar_node, rgbd_node
 
 
-def test_lidar_ros_transport_and_preserved_header(monkeypatch):
+@pytest.mark.parametrize("world_input", [False, True])
+def test_lidar_ros_transport_and_preserved_header(monkeypatch, world_input):
+    model_inputs = []
+
+    def segment(xyz, intensity):
+        model_inputs.append(xyz.copy())
+        return PointLabels(
+            np.ones(len(xyz), dtype=np.uint32),
+            np.full(len(xyz), 0.9, dtype=np.float32),
+        )
+
     def create_stub(*args, **kwargs):
         return SimpleNamespace(
             device="test-only",
             label_names={1: "test"},
-            segment=lambda xyz, intensity: PointLabels(
-                np.ones(len(xyz), dtype=np.uint32),
-                np.full(len(xyz), 0.9, dtype=np.float32),
-            ),
+            segment=segment,
         )
 
     monkeypatch.setattr(lidar_node, "RangeNetSegmenter", create_stub)
@@ -59,13 +67,24 @@ def test_lidar_ros_transport_and_preserved_header(monkeypatch):
     publisher = client.create_publisher(
         PointCloud2, name + "/input", qos_profile_sensor_data
     )
-    header = Header(frame_id="lidar")
+    header = Header(frame_id="world" if world_input else "lidar")
     header.stamp.sec = 42
     header.stamp.nanosec = 123
-    cloud = xyz_cloud(np.array([[1, 0, 0], [2, 0, 0]], dtype=np.float32), header)
+    points = [[1, 1, 0], [1, 2, 0]] if world_input else [[1, 0, 0], [2, 0, 0]]
+    cloud = xyz_cloud(np.array(points, dtype=np.float32), header)
     try:
         deadline = time.monotonic() + 5
+        tf_time = time.monotonic() + 0.2
+        tf_sent = False
         while not received and time.monotonic() < deadline:
+            if world_input and not tf_sent and time.monotonic() >= tf_time:
+                assert not received, "world cloud must wait for the timestamped TF"
+                tf = TransformStamped(header=header, child_frame_id="lidar")
+                tf.transform.translation.x = 1.0
+                tf.transform.rotation.z = np.sqrt(0.5)
+                tf.transform.rotation.w = np.sqrt(0.5)
+                node.tf_buffer.set_transform(tf, "test")
+                tf_sent = True
             publisher.publish(cloud)
             executor.spin_once(timeout_sec=0.05)
         assert received, "ROS publisher/subscriber did not deliver labeled cloud"
@@ -74,6 +93,8 @@ def test_lidar_ros_transport_and_preserved_header(monkeypatch):
             cloud_to_arrays(received[0])[0], cloud_to_arrays(cloud)[0]
         )
         assert (cloud_view(received[0])["label"] == 1).all()
+        assert "rgb" in cloud_view(received[0]).dtype.names
+        np.testing.assert_allclose(model_inputs[-1], [[1, 0, 0], [2, 0, 0]], atol=1e-6)
     finally:
         client.destroy_subscription(subscription)
         executor.shutdown()

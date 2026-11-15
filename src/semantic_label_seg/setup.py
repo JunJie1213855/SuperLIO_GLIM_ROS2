@@ -14,6 +14,7 @@ setup(
         ),
         ("share/semantic_label_seg/config", glob("config/*.yaml")),
         ("share/semantic_label_seg/launch", glob("launch/*.launch.py")),
+        ("share/semantic_label_seg/rviz", glob("rviz/*.rviz")),
         ("share/semantic_label_seg/third_party", glob("third_party/*")),
     ],
     install_requires=["setuptools", "numpy", "PyYAML"],

@@ -17,7 +17,9 @@ LIO 与重定位仅采用点到面观测，平面匹配失败的点直接丢弃�
 | 保存地图 | 服务保存完整优化关键帧地图，可配置退出自动保存，无需录制 rosbag |
 | 重定位 | S 系累积局部地图快照 → TEASER++ / GICP → 状态与协方差变换 → 参考地图跟踪 |
 | 地图合并 | 导出各会话关键帧 → GLIM dump → Offline Viewer 配准优化 → merged.pcd |
-| 语义标签 | 独立 `semantic_label_seg` 库：RangeNet 点云标签与 YOLO / RGB-D 标签，提供 Humble 节点 |
+| 语义标签 | 独立 `semantic_label_seg` 库，支持 Super-LIO 去畸变点云 → RangeNet 标签 → RViz 配色联合启动，以及 YOLO / RGB-D 标签 |
+
+已有 [Super-LIO 真实点云预览](docs/images/superlio_pointcloud_preview.png)（按高度着色）；按语义类别着色需要提供训练好的 RangeNet 权重。
 
 ## 构建
 
@@ -48,6 +50,7 @@ source install/setup.bash
 - [闭环配准与 iSAM2 PGO 理论](docs/loop_pgo_path.md)
 - [重定位坐标系、状态与协方差理论](docs/relocation_math.md)
 - [语义标签库：API、模型权重与 ROS 2 接口](src/semantic_label_seg/README.md)
+- [Super-LIO + 语义标签可视化：联合启动与 RViz](src/semantic_label_seg/README.md#super-lio--语义标签可视化当前推荐入口)
 
 ```text
 src/SuperLIO_SLAM/   SuperLIO 前端、回环、保存地图与重定位

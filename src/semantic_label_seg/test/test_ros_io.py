@@ -63,7 +63,12 @@ def test_cloud_conversion_preserves_fields_order_stamp_and_endianness(big_endian
     np.testing.assert_equal(points[:, 0], [1, 2, 3, np.nan])
     np.testing.assert_equal(intensity, [10, 20, 30, 40])
     output = with_labels(
-        cloud, np.array([1, 2, 3, 0], dtype=np.uint32), np.array([0.9, 0.8, 0.7, 0])
+        cloud,
+        np.array([1, 2, 3, 0], dtype=np.uint32),
+        np.array([0.9, 0.8, 0.7, 0]),
+        colors=np.array(
+            [[255, 0, 0], [0, 255, 0], [0, 0, 255], [96, 96, 96]], dtype=np.uint8
+        ),
     )
     assert output.header == cloud.header
     assert output.width == 2 and output.height == 2
@@ -73,6 +78,7 @@ def test_cloud_conversion_preserves_fields_order_stamp_and_endianness(big_endian
     np.testing.assert_equal(result["label"], [[1, 2], [3, 0]])
     np.testing.assert_equal(result["intensity"], [[10, 20], [30, 40]])
     np.testing.assert_equal(result["x"], cloud_view(cloud)["x"])
+    np.testing.assert_equal(result["rgb"], [[0xFF0000, 0x00FF00], [0x0000FF, 0x606060]])
     replaced = with_labels(output, np.zeros(4, dtype=np.uint32), np.zeros(4))
     assert sum(f.name == "label" for f in replaced.fields) == 1
     assert not cloud_view(replaced)["label"].any()
